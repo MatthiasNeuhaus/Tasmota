@@ -22,7 +22,7 @@
 #ifdef JPEG_PICTS
 
 #include "img_converters.h"
-#include "esp_jpg_decode.h"
+#include "jpeg_decoder.h"
 
 void rgb888_to_565(uint8_t *in, uint16_t *out, uint32_t len) {
 uint8_t red, grn, blu;
@@ -66,7 +66,7 @@ typedef struct {
 } rgb_jpg_decoder;
 
 //input buffer
-static uint32_t _jpg_read(void * arg, size_t index, uint8_t *buf, size_t len)
+static size_t _jpg_read(void * arg, size_t index, uint8_t *buf, size_t len)
 {
     rgb_jpg_decoder * jpeg = (rgb_jpg_decoder *)arg;
     if(buf) {

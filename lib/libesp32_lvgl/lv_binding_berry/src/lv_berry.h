@@ -12,8 +12,8 @@ extern "C" {
 
 extern void be_load_lvgl_classes(bvm *vm);
 
-// TODO temporary fix
 extern void lv_image_set_tasmota_logo(lv_obj_t * img);
+extern void lv_image_set_tasmota_logo36(lv_obj_t * img);
 
 // used for ToushScreen calibration
 typedef struct lv_ts_calibration_t {
@@ -25,6 +25,8 @@ typedef struct lv_ts_calibration_t {
 } lv_ts_calibration_t;
 extern lv_ts_calibration_t lv_ts_calibration;
 
+// add accessor for lv_bar->indic_area
+extern lv_area_t * lv_bar_get_indic_area(lv_obj_t * bar);
 
 #ifdef __cplusplus
 }

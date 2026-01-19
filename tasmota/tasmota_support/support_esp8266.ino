@@ -11,6 +11,8 @@
  * ESP8266 and ESP8285 Support
 \*********************************************************************************************/
 
+const static char kWifiPhyMode[] PROGMEM = "low rate|11b|11g|11n"; // Wi-Fi Modes
+
 extern "C" {
 extern struct rst_info resetInfo;
 }
@@ -116,6 +118,10 @@ uint32_t ESP_getFlashChipRealSize(void) {
 
 uint32_t ESP_getFlashChipSize(void) {
   return ESP.getFlashChipSize();
+}
+
+uint32_t ESP_getFlashChipSpeed(void) {
+  return ESP.getFlashChipSpeed();
 }
 
 uint32_t ESP_getPsramSize(void) {
@@ -256,6 +262,11 @@ String ESP_getEfuseMac(void) {
     }
   }
   return String(macStr);
+}
+
+String WifiGetPhyMode(void) {
+  char stemp[10];
+  return String(GetTextIndexed(stemp, sizeof(stemp), WiFiHelper::getPhyMode() & 0x3, kWifiPhyMode));
 }
 
 /*********************************************************************************************\

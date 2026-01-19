@@ -29,12 +29,60 @@
  *   GvUrl                  - Show current url
  *   GvUrl 1                - Select default url (GV_BASE_URL)
  *   GvUrl https://thelastoutpostworkshop.github.io/microcontroller_devkit/gpio_viewer_1_5/
+ *
+ * Note 20251025
+ * - GVRelease 1.7.0
+ * - Add APP partition info
+ * - Add more Information
+ * 
+ * Note 20250503
+ * - GVRelease 1.6.3 (No code change)
+ * 
+ * Note 20250223
+ * - GVRelease 1.6.2 (No code change)
+ * 
+ * Note 20250126
+ * - GVRelease 1.6.1 (No code change)
+ * 
+ * Note 20250116
+ * - GVRelease 1.6.0 (No code change)
+ * 
+ * Note 20250109
+ * - GVRelease 1.5.9 (No code change)
+ * 
+ * Note 20241221
+ * - GVRelease 1.5.8 (No code change)
+ * 
+ * Note 20240821
+ * - GVRelease 1.5.6
+ * - Add ADC pin function information
+ * - Add ESP32 Touch pin function information
+ * 
+ * Note 20240717
+ * - GVRelease 1.5.5
+ * 
+ * Note 20240602
+ * - GVRelease 1.5.4
+ * 
+ * Note 20240518
+ * - GVRelease 1.5.3
+ * 
+ * Note 20240506
+ * - Tasmota v14.0.0
+ * - GVRelease 1.5.2
+ * - Function pinmode is not fully implemented by gpio_viewer_1_5:
+ *   Only INPUT_PULLUP and INPUT_PULLDOWN are reported as INPUT
+ *   Only OUTPUT and OUTPUT_OPEN_DRAIN are reported as OUTPUT
+ *   All other pin modes are reported as UNKNOWN
+ * - This driver is forcing INPUT_PULLUP for ANALOG and INPUT
+ * - Execute once command GvUrl https://thelastoutpostworkshop.github.io/microcontroller_devkit/gpio_viewer_1_5/
+ * - Clear browser cache to use new functionality
 \*********************************************************************************************/
 
 #define XDRV_121              121
 
-//#define GV_INPUT_DETECTION                 // Report type of digital input
-#define GV_USE_ESPINFO                     // Provide ESP info
+//#define GV_USE_ESPINFO                   // Add ESP8266 info
+//#define GV_DEBUG
 
 #ifndef GV_PORT
 #define GV_PORT               5557         // [GvPort] SSE webserver port
@@ -43,19 +91,36 @@
 #define GV_SAMPLING_INTERVAL  100          // [GvSampling] milliseconds - Use Tasmota Scheduler (100) or Ticker (20..99,101..1000)
 #endif
 #ifndef GV_BASE_URL
-//#define GV_BASE_URL           "https://thelastoutpostworkshop.github.io/microcontroller_devkit/gpio_viewer_1_5/"  // [GvUrl]
-#define GV_BASE_URL           "https://ota.tasmota.com/tasmota/gpioviewer/gpio_viewer_13_4_0/"  // [GvUrl]
+#define GV_BASE_URL           "https://thelastoutpostworkshop.github.io/microcontroller_devkit/gpio_viewer_1_5/"  // [GvUrl]
+//#define GV_BASE_URL           "https://ota.tasmota.com/tasmota/gpioviewer/gpio_viewer_13_4_0/"  // [GvUrl]
 #endif
 
 #define GV_KEEP_ALIVE         1000         // milliseconds - If no activity after this do a heap size event anyway
 
-const char *GVRelease = "1.5.0";
+const char *GVRelease = "1.7.0";
+
+/*********************************************************************************************/
+
+// GPIO FUNCTIONS as defined by esp32-hal-gpio.h to be used by ESP8266 too, which uses different numbers
+// Also defined in gpio_viewer_1_5 const.ts
+#define GV_UNAVAILABLE        -2           // Addition by gpio_viewer_1_5
+#define GV_NOT_SET            -1           // Addition by gpio_viewer_1_5
+#define GV_NOT_USED           0            // Addition by this driver
+#define GV_INPUT              0x01         // Not defined in gpio_viewer_1_5 !?!
+#define GV_OUTPUT             0x03
+#define GV_PULLUP             0x04
+#define GV_INPUT_PULLUP       0x05
+#define GV_PULLDOWN           0x08
+#define GV_INPUT_PULLDOWN     0x09
+#define GV_OPEN_DRAIN         0x10
+#define GV_OUTPUT_OPEN_DRAIN  0x13
+#define GV_ANALOG             0xC0
 
 #ifdef USE_UNISHOX_COMPRESSION
   #include "./html_compressed/HTTP_GV_PAGE.h"
 #else
   #include "./html_uncompressed/HTTP_GV_PAGE.h"
-#endif
+#endif  // USE_UNISHOX_COMPRESSION
 
 const char HTTP_GV_EVENT[] PROGMEM =
   "HTTP/1.1 200 OK\n"
@@ -67,10 +132,7 @@ const char HTTP_GV_EVENT[] PROGMEM =
 enum GVPinTypes {
   GV_DigitalPin = 0,
   GV_PWMPin = 1,
-  GV_AnalogPin = 2,
-  GV_InputPin = 3,
-  GV_InputPullUp = 4,
-  GV_InputPullDn = 5
+  GV_AnalogPin = 2
 };
 
 typedef struct {
@@ -78,46 +140,95 @@ typedef struct {
   Ticker ticker;
   String baseUrl;
   int lastPinStates[MAX_GPIO_PIN];
+  int pinmode[MAX_GPIO_PIN];
   uint32_t lastSentWithNoActivity;
   uint32_t freeHeap;
   uint32_t freePSRAM;
   uint16_t sampling;
   uint16_t init_done;
   uint16_t port;
+  uint8_t ADCPinsCount;
+#ifdef ESP8266
+  uint8_t ADCPins[1];
+#else  // ESP32
+  uint8_t ADCPins[MAX_GPIO_PIN];
+  uint8_t TouchPins[MAX_GPIO_PIN];
+  uint8_t TouchPinsCount;
+#endif  // ESP32
   bool mutex;
   bool sse_ready;
 } tGV;
 tGV* GV = nullptr;
 WiFiClient GVWebClient;
 
-#ifdef GV_INPUT_DETECTION
+/*********************************************************************************************/
 
 int GetPinMode(uint32_t pin) {
 #ifdef ESP8266  
-  if (pin > MAX_GPIO_PIN -2) { return -1; }                // Skip GPIO16 and Analog0
+//  if (17 == pin) { return GV_ANALOG; }    
+  if (17 == pin) { return GV_INPUT_PULLUP; }  // See Note 20240506
+  if (16 == pin) { return GV_NOT_USED; }      // Skip GPIO16
 #endif  // ESP8266
-#ifdef ESP32  
-  if (pin > MAX_GPIO_PIN) { return -1; }
-#endif  // ESP32
 
   uint32_t bit = digitalPinToBitMask(pin);
   uint32_t port = digitalPinToPort(pin);
   volatile uint32_t *reg = portModeRegister(port);
-  if (*reg & bit) { return OUTPUT; }                       // ESP8266 = 0x01, ESP32 = 0x03
+  if (*reg & bit) { return GV_OUTPUT; }       // ESP8266 = 0x01, ESP32 = 0x03
   // Detecting INPUT_PULLUP doesn't function consistently
-  volatile uint32_t *out = portOutputRegister(port);
-  return ((*out & bit) ? INPUT_PULLUP : INPUT);            // ESP8266 = 0x02 : 0x00, ESP32 = 0x05 : x01
+//  volatile uint32_t *out = portOutputRegister(port);
+//  return ((*out & bit) ? GV_INPUT_PULLUP : GV_INPUT);  // ESP8266 = 0x02 : 0x00, ESP32 = 0x05 : x01
+  return GV_INPUT_PULLUP;                     // ESP8266 = 0x02 : 0x00, ESP32 = 0x05 : x01
 }
 
-#endif  // GV_INPUT_DETECTION
+/*-------------------------------------------------------------------------------------------*/
+
+#ifdef ESP32
+#ifdef SOC_ADC_SUPPORTED
+#include "soc/adc_periph.h"
+
+int8_t GVDigitalPinToAnalogChannel(uint8_t pin) {
+  uint8_t channel = 0;
+  if (pin < SOC_GPIO_PIN_COUNT) {
+    for (uint8_t j = 0; j < SOC_ADC_MAX_CHANNEL_NUM; j++) {
+      if (adc_channel_io_map[0][j] == pin) {  // Tasmota supports ADC1 only
+        return channel;
+      }
+      channel++;
+    }
+  }
+  return -1;
+}
+#endif  // SOC_ADC_SUPPORTED
+#endif  // ESP32
+
+/*********************************************************************************************/
 
 bool GVInit(void) {
   if (!GV) {
-    GV = (tGV*)calloc(sizeof(tGV), 1);
+    // Executed once
+    GV = (tGV*)calloc(1, sizeof(tGV));
     if (GV) {
       GV->sampling = (GV_SAMPLING_INTERVAL < 20) ? 20 : GV_SAMPLING_INTERVAL;
       GV->baseUrl = GV_BASE_URL;
       GV->port = GV_PORT;
+#ifdef ESP8266
+      GV->ADCPins[0] = 17;
+      GV->ADCPinsCount = 1;
+#else  // ESP32
+      int8_t channel;
+      for (int i = 0; i < MAX_GPIO_PIN; i++) {
+#ifdef SOC_ADC_SUPPORTED
+        channel = GVDigitalPinToAnalogChannel(i);
+        if (channel != -1) {
+          GV->ADCPins[GV->ADCPinsCount++] = i;
+        }
+#endif  // SOC_ADC_SUPPORTED
+        channel = digitalPinToTouchChannel(i);
+        if (channel != -1) {
+          GV->TouchPins[GV->TouchPinsCount++] = i;
+        }
+      }
+#endif  // ESP32
       return true;
     }
     return false;
@@ -125,13 +236,7 @@ bool GVInit(void) {
   return true;
 }
 
-void GVStop(void) {
-  GV->sse_ready = false;
-  GV->ticker.detach();
-
-  GV->WebServer->stop();
-  GV->WebServer = nullptr;
-}
+/*-------------------------------------------------------------------------------------------*/
 
 void GVBegin(void) {
   if (GV->WebServer == nullptr) {
@@ -141,15 +246,29 @@ void GVBegin(void) {
   //  GV->WebServer->sendHeader(F("Access-Control-Allow-Methods"), F("GET, POST, OPTIONS"));
   //  GV->WebServer->sendHeader(F("Access-Control-Allow-Headers"), F("Content-Type"));
     GV->WebServer->on("/", GVHandleRoot);
+    GV->WebServer->on("/events", GVHandleEvents);
     GV->WebServer->on("/release", GVHandleRelease);
     GV->WebServer->on("/free_psram", GVHandleFreePSRam);
     GV->WebServer->on("/sampling", GVHandleSampling);
     GV->WebServer->on("/espinfo", GVHandleEspInfo);
     GV->WebServer->on("/partition", GVHandlePartition);
-    GV->WebServer->on("/events", GVHandleEvents);
+    GV->WebServer->on("/pinmodes", GVHandlePinModes);
+    GV->WebServer->on("/pinfunctions", GVHandlePinFunctions);
     GV->WebServer->begin();
   }
 }
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVStop(void) {
+  GV->sse_ready = false;
+  GV->ticker.detach();
+
+  GV->WebServer->stop();
+  GV->WebServer = nullptr;
+}
+
+/*********************************************************************************************/
 
 void GVHandleRoot(void) {
   GVCloseEvent();
@@ -169,102 +288,13 @@ void GVHandleRoot(void) {
 }
 
 void GVWebserverSendJson(String &jsonResponse) {
+#ifdef GV_DEBUG
+  AddLog(LOG_LEVEL_DEBUG, PSTR("IOV: GVWebserverSendJson '%s'"), jsonResponse.c_str());
+#endif  // GV_DEBUG
   GV->WebServer->send(200, "application/json", jsonResponse);
 }
 
-void GVHandleRelease(void) {
-  String jsonResponse = "{\"release\":\"" + String(GVRelease) + "\"}";
-  GVWebserverSendJson(jsonResponse);
-}
-
-void GVHandleFreePSRam(void) {
-  String jsonResponse = "{\"freePSRAM\":\"";
-#ifdef ESP32
-  if (UsePSRAM()) {
-    jsonResponse += String(ESP.getFreePsram() / 1024) + " KB\"}";
-  } else
-#endif
-    jsonResponse += "No PSRAM\"}";
-  GVWebserverSendJson(jsonResponse);
-}
-
-void GVHandleSampling(void) {
-  String jsonResponse = "{\"sampling\":\"" + String(GV->sampling) + "\"}";
-  GVWebserverSendJson(jsonResponse);
-}
-
-void GVHandleEspInfo(void) {
-#ifdef GV_USE_ESPINFO
-  const FlashMode_t flashMode = ESP.getFlashChipMode(); // enum
-
-  String jsonResponse = "{\"chip_model\":\"" + GetDeviceHardware();
-  jsonResponse += "\",\"cores_count\":\"" + String(ESP_getChipCores());
-  jsonResponse += "\",\"chip_revision\":\"" + String(ESP_getChipRevision());
-  jsonResponse += "\",\"cpu_frequency\":\"" + String(ESP.getCpuFreqMHz());
-  jsonResponse += "\",\"cycle_count\":" + String(ESP.getCycleCount());
-  jsonResponse += ",\"mac\":\"" + ESP_getEfuseMac();
-  jsonResponse += "\",\"flash_mode\":" + String(flashMode);
-#ifdef ESP8266
-  jsonResponse += ",\"flash_chip_size\":" + String(ESP.getFlashChipRealSize());
-#else
-  jsonResponse += ",\"flash_chip_size\":" + String(ESP.getFlashChipSize());
-#endif
-  jsonResponse += ",\"flash_chip_speed\":" + String(ESP.getFlashChipSpeed());
-  jsonResponse += ",\"heap_size\":" + String(ESP_getHeapSize());
-  jsonResponse += ",\"heap_max_alloc\":" + String(ESP_getMaxAllocHeap());
-  jsonResponse += ",\"psram_size\":" + String(ESP_getPsramSize());
-  jsonResponse += ",\"free_psram\":" + String(ESP_getFreePsram());
-  jsonResponse += ",\"psram_max_alloc\":" + String(ESP_getMaxAllocPsram());
-  jsonResponse += ",\"free_heap\":" + String(ESP_getFreeHeap());
-  jsonResponse += ",\"up_time\":\"" + String(millis());
-  jsonResponse += "\",\"sketch_size\":" + String(ESP_getSketchSize());
-  jsonResponse += ",\"free_sketch\":" + String(ESP_getFreeSketchSpace());
-  jsonResponse += "}";
-#else
-  String jsonResponse = "{\"chip_model\":\"" + GetDeviceHardware() + "\"}";
-#endif  // GV_USE_ESPINFO
-  GVWebserverSendJson(jsonResponse);
-}
-
-void GVHandlePartition(void) {
-  String jsonResponse = "["; // Start of JSON array
-#ifdef ESP32
-  bool firstEntry = true;    // Used to format the JSON array correctly
-
-  esp_partition_iterator_t iter = esp_partition_find(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, NULL);
-//  esp_partition_iterator_t iter = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
-
-  // Loop through partitions
-  while (iter != NULL) {
-    const esp_partition_t *partition = esp_partition_get(iter);
-
-    // Add comma before the next entry if it's not the first
-    if (!firstEntry)
-    {
-        jsonResponse += ",";
-    }
-    firstEntry = false;
-
-    // Append partition information in JSON format
-    jsonResponse += "{";
-    jsonResponse += "\"label\":\"" + String(partition->label) + "\",";
-    jsonResponse += "\"type\":" + String(partition->type) + ",";
-    jsonResponse += "\"subtype\":" + String(partition->subtype) + ",";
-    jsonResponse += "\"address\":\"0x" + String(partition->address, HEX) + "\",";
-    jsonResponse += "\"size\":" + String(partition->size);
-    jsonResponse += "}";
-
-    // Move to next partition
-    iter = esp_partition_next(iter);
-  }
-
-  // Clean up the iterator
-  esp_partition_iterator_release(iter);
-#endif  // ESP32
-
-  jsonResponse += "]"; // End of JSON array
-  GVWebserverSendJson(jsonResponse);
-}
+/*-------------------------------------------------------------------------------------------*/
 
 void GVHandleEvents(void) {
   GVWebClient = GV->WebServer->client();
@@ -273,13 +303,308 @@ void GVHandleEvents(void) {
 
   GV->WebServer->setContentLength(CONTENT_LENGTH_UNKNOWN);  // The payload can go on forever
   GV->WebServer->sendContent_P(HTTP_GV_EVENT);
-
+#ifdef ESP32
+  GVWebClient.setSSE(true);
+#endif
   GV->sse_ready = true;                                     // Ready for async updates
   if (GV->sampling != 100) {
     GV->ticker.attach_ms(GV->sampling, GVMonitorTask);      // Use Tasmota Scheduler (100) or Ticker (20..99,101..1000)
   }
   AddLog(LOG_LEVEL_DEBUG, PSTR("IOV: Connected"));
 }
+
+/*********************************************************************************************/
+
+void GVHandleRelease(void) {
+  String jsonResponse = "{\"release\":\"" + String(GVRelease) + "\"}";
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVHandleFreePSRam(void) {
+  String jsonResponse = "{\"freePSRAM\":\"";
+#ifdef ESP32
+  if (UsePSRAM()) {
+    jsonResponse += String(ESP.getFreePsram() / 1024) + " KB\"}";
+  } else
+#endif  // ESP32
+    jsonResponse += "No PSRAM\"}";
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVHandleSampling(void) {
+  String jsonResponse = "{\"sampling\":\"" + String(GV->sampling) + "\"}";
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVHandleEspInfo(void) {
+#ifdef GV_USE_ESPINFO
+  String jsonResponse = "{";
+  auto appendField = [&](const char *key, const String &value, bool quoted) {
+    if (jsonResponse.length() > 1) {
+      jsonResponse += ",";
+    }
+    jsonResponse += "\"";
+    jsonResponse += key;
+    jsonResponse += "\":";
+    if (quoted) {
+      jsonResponse += "\"";
+    }
+    jsonResponse += value;
+    if (quoted) {
+      jsonResponse += "\"";
+    }
+  };
+  appendField("chip_model", GetDeviceHardware(), true);
+  appendField("cores_count", String(ESP_getChipCores()), true);
+  appendField("chip_revision", String(ESP_getChipRevision()), true);
+  appendField("cpu_frequency", String(ESP.getCpuFreqMHz()), true);
+  appendField("cycle_count", String(ESP.getCycleCount()), false);
+  appendField("mac", ESP_getEfuseMac(), true);
+  appendField("flash_mode", D_TASMOTA_FLASHMODE, true);
+
+#ifdef ESP32
+  appendField("flash_chip_size", String(ESP.getFlashChipSize()), false);
+#else  // ESP8266
+  appendField("flash_chip_size", String(ESP.getFlashChipRealSize()), false);
+#endif
+
+  appendField("flash_chip_speed", String(ESP_getFlashChipSpeed()), false);
+  appendField("heap_size", String(ESP_getHeapSize()), false);
+  appendField("heap_max_alloc", String(ESP_getMaxAllocHeap()), false);
+  appendField("psram_size", String(ESP_getPsramSize()), false);
+  appendField("free_psram", String(ESP_getFreePsram()), false);
+  appendField("psram_max_alloc", String(ESP_getMaxAllocPsram()), false);
+  appendField("free_heap", String(ESP_getFreeHeap()), false);
+
+#ifdef ESP32
+  size_t heapFree8bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  appendField("heap_free_8bit", String(heapFree8bit), false);
+  size_t heapFree32bit = heap_caps_get_free_size(MALLOC_CAP_32BIT);
+  appendField("heap_free_32bit", String(heapFree32bit), false);
+  size_t heapLargestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  appendField("heap_largest_free_block", String(heapLargestBlock), false);
+#endif  // ESP32
+
+  appendField("up_time", String(UpTime() * 1000), true);
+
+#ifdef ESP32
+  uint64_t uptimeUs = static_cast<uint64_t>(esp_timer_get_time());
+  appendField("uptime_us", String(static_cast<unsigned long long>(uptimeUs)), false);
+#endif  // ESP32
+
+  appendField("sketch_size", String(ESP_getSketchSize()), false);
+  appendField("free_sketch", String(ESP_getFreeSketchSpace()), false);
+  String arduinoCoreVersion = ARDUINO_CORE_RELEASE;
+  arduinoCoreVersion.replace("_", ".");
+  appendField("arduino_core_version", arduinoCoreVersion, true);
+
+#ifdef ESP32
+  appendField("sdk_version", String(ESP.getSdkVersion()), true);
+  appendField("idf_version", String(esp_get_idf_version()), true);
+#endif  // ESP32
+
+  String sketchMD5 = ESP.getSketchMD5();   // This takes some time
+  if (sketchMD5.length() > 0) {
+    appendField("sketch_md5", sketchMD5, true);
+  }
+
+#ifdef ESP32
+  appendField("chip_features", GetDeviceFeatures(), false);
+#endif  // ESP32
+
+  appendField("reset_reason_code", String(ResetReason()), false);
+  appendField("reset_reason", String(GetResetReason()), true);
+
+#if defined(CONFIG_IDF_TARGET_ESP32) || (defined(SOC_TEMP_SENSOR_SUPPORTED) && SOC_TEMP_SENSOR_SUPPORTED)
+  float temperatureC = temperatureRead();
+  if (!isnan(temperatureC)) {
+    appendField("temperature_c", String(temperatureC, 2), false);
+  }
+#endif
+
+  jsonResponse += "}";
+#else   // No GV_USE_ESPINFO
+  String jsonResponse = "{\"chip_model\":\"" + GetDeviceHardware() + "\"}";
+#endif  // GV_USE_ESPINFO
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVHandlePartition(void) {
+  String jsonResponse = "["; // Start of JSON array
+#ifdef ESP8266
+#ifdef GV_USE_ESPINFO
+  int fl_tasmota = 0x0;
+  int fl_settings = (SETTINGS_LOCATION - CFG_ROTATES) * SPI_FLASH_SEC_SIZE;
+  int fl_filesystem = (FLASH_FS_SIZE) ? FLASH_FS_START * SPI_FLASH_SEC_SIZE : -1;
+  int fl_eeprom = EEPROM_LOCATION * SPI_FLASH_SEC_SIZE;  // eeprom, rfcal, wifi
+  int fl_end = ESP.getFlashChipSize();
+  int fl_ota = ((fl_filesystem > 0x100000) || (fl_eeprom > 0x100000)) ? 0x100000 : -1;
+
+  int fl_settings_pend = fl_eeprom;
+  if (fl_ota > 0) { 
+    fl_settings_pend = fl_ota;
+  }
+  else if (fl_filesystem > 0) {
+    fl_settings_pend = fl_filesystem;
+  }
+  int fl_ota_end = fl_eeprom;
+  if (fl_filesystem > 0) {
+    fl_ota_end = fl_filesystem;
+  }
+
+  struct Partition {
+    String label;       // Label, zero-terminated ASCII string
+    uint8_t type;       // 0 = Application, 1 = Data
+    uint8_t subtype;    // 0 = OTA selection, 1 = PHY init data, 16 = OTA0, 17 = OTA1, 131 = LITTLEFS
+    int address;        // Starting address in flash
+    int size;           // Size in bytes
+  };
+
+  static const Partition part_info[] = {
+    { "tasmota", 0, 16, fl_tasmota, fl_settings - fl_tasmota },
+    { "settings", 1, 0, fl_settings, fl_settings_pend - fl_settings },
+    { "ota1", 0, 17, fl_ota, fl_ota_end - fl_ota },
+    { "littlefs", 1, 131, fl_filesystem, fl_eeprom - fl_filesystem  },
+    { "rfcal", 1, 1, fl_eeprom, fl_end - fl_eeprom }
+  };
+
+  for (uint32_t i = 0; i < 5; i++) {
+    if (part_info[i].address != -1) {
+      if (jsonResponse.length() > 2) {
+        jsonResponse += ",";
+      }
+      jsonResponse += "{\"label\":\"" + String(part_info[i].label);
+      jsonResponse += "\",\"type\":" + String(part_info[i].type);
+      jsonResponse += ",\"subtype\":" + String(part_info[i].subtype);
+      jsonResponse += ",\"address\":\"0x" + String(part_info[i].address, HEX);
+      jsonResponse += "\",\"size\":" + String(part_info[i].size) + "}";
+    }
+  }
+#endif  // GV_USE_ESPINFO
+#endif  // ESP8266
+#ifdef ESP32
+  bool firstEntry = true;    // Used to format the JSON array correctly
+  const esp_partition_t *cur_part = esp_ota_get_running_partition();
+
+  auto appendPartitions = [&](esp_partition_type_t type) {
+    esp_partition_iterator_t iter = esp_partition_find(type, ESP_PARTITION_SUBTYPE_ANY, NULL);
+
+    while (iter != NULL) {
+      const esp_partition_t *partition = esp_partition_get(iter);
+
+      if (!firstEntry) {
+        jsonResponse += ",";
+      }
+      firstEntry = false;
+
+      // Append partition information in JSON format
+      jsonResponse += "{";
+
+//      jsonResponse += "\"label\":\"" + String(partition->label) + "\",";
+      String label = partition->label;
+      if (label == "spiffs") {
+        label = "littlefs";
+      }
+      else if ((label == "app0") || (label == "app1")) {
+        if (label = String(cur_part->label)) {
+          label = "tasmota";
+        }
+      }
+      jsonResponse += "\"label\":\"" + label + "\",";
+
+      jsonResponse += "\"type\":" + String(partition->type) + ",";
+      jsonResponse += "\"subtype\":" + String(partition->subtype) + ",";
+      jsonResponse += "\"address\":\"0x" + String(partition->address, HEX) + "\",";
+      jsonResponse += "\"size\":" + String(partition->size);
+      jsonResponse += "}";
+
+      iter = esp_partition_next(iter); // Move to next partition
+    }
+
+    esp_partition_iterator_release(iter); // Clean up iterator
+  };
+
+  appendPartitions(ESP_PARTITION_TYPE_DATA);
+  appendPartitions(ESP_PARTITION_TYPE_APP);
+#endif  // ESP32
+
+  jsonResponse += "]"; // End of JSON array
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVHandlePinModes(void) {
+  String jsonResponse = "["; // Start of JSON array
+  bool firstEntry = true;    // Used to format the JSON array correctly
+
+  for (int i = 0; i < MAX_GPIO_PIN; i++) {
+    if (GV->pinmode[i] != GV_NOT_USED) {
+      if (!firstEntry)
+      {
+        jsonResponse += ",";
+      }
+      firstEntry = false;
+      jsonResponse += "{";
+      jsonResponse += "\"pin\":\"" + String(i) + "\",";
+      jsonResponse += "\"mode\":\"" + String(GV->pinmode[i]) + "\"";
+      jsonResponse += "}";
+    }
+  }
+  jsonResponse += "]"; // End of JSON array
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*-------------------------------------------------------------------------------------------*/
+
+void GVStartPinFunction(const char *pinFunction, String *json) {
+  *json += "{\"name\":\"" + String(pinFunction) + "\",\"functions\":[";
+}
+
+void GVAddPinFunction(const char *pinName, int pin, String *json) {
+  if (!json->endsWith("["))
+  {
+     *json += ",";
+  }
+
+  *json += "{\"function\":\"" + String(pinName) + "\",\"pin\":" + String(pin) + "}";
+}
+
+void GVHandlePinFunctions(void) {
+  String jsonResponse = "{\"boardpinsfunction\":[";
+
+  // ADC pins
+  GVStartPinFunction("ADC", &jsonResponse);
+  for (int i = 0; i < GV->ADCPinsCount; i++)
+  {
+    GVAddPinFunction("ADC", GV->ADCPins[i], &jsonResponse);
+  }
+  jsonResponse += "]}";
+
+#ifdef ESP32
+  // Touch pins
+  jsonResponse += ",";
+  GVStartPinFunction("Touch", &jsonResponse);
+  for (int i = 0; i < GV->TouchPinsCount; i++)
+  {
+    GVAddPinFunction("Touch", GV->TouchPins[i], &jsonResponse);
+  }
+  jsonResponse += "]}";
+#endif  // ESP32
+
+  jsonResponse += "]}";
+  GVWebserverSendJson(jsonResponse);
+}
+
+/*********************************************************************************************/
 
 void GVEventDisconnected(void) {
   if (GV->sse_ready) {
@@ -289,12 +614,16 @@ void GVEventDisconnected(void) {
   GV->ticker.detach();
 }
 
+/*-------------------------------------------------------------------------------------------*/
+
 void GVCloseEvent(void) {
   if (GV->WebServer) {
     GVEventSend("{}", "close", millis());                   // Closes web page
     GVEventDisconnected();
   }
 }
+
+/*-------------------------------------------------------------------------------------------*/
 
 //void GVEventSend(const char *message, const char *event=NULL, uint32_t id=0, uint32_t reconnect=0);
 void GVEventSend(const char *message, const char *event, uint32_t id) {
@@ -307,6 +636,8 @@ void GVEventSend(const char *message, const char *event, uint32_t id) {
   }
 }
 
+/*********************************************************************************************/
+
 void GVMonitorTask(void) {
   // Monitor GPIO Values
   if (GV->mutex) { return; }
@@ -318,6 +649,7 @@ void GVMonitorTask(void) {
 
   String jsonMessage = "{";
   for (uint32_t pin = 0; pin < MAX_GPIO_PIN; pin++) {
+    int pinmode = GV_NOT_USED;
     int currentState = 0;
 
 #ifdef ESP32
@@ -325,6 +657,7 @@ void GVMonitorTask(void) {
     int pwm_resolution = ledcReadDutyResolution(pin);
     if (pwm_resolution > 0) {
       pintype = GV_PWMPin;
+      pinmode = GV_OUTPUT;
       originalValue = ledcRead2(pin);
       currentState = changeUIntScale(originalValue, 0, pwm_resolution, 0, 255);   // Bring back to 0..255
     }
@@ -335,6 +668,7 @@ void GVMonitorTask(void) {
     int pwm_value = AnalogRead(pin);
     if (pwm_value > -1) {
       pintype = GV_PWMPin;
+      pinmode = GV_OUTPUT;
       originalValue = pwm_value;
       currentState = changeUIntScale(originalValue, 0, Settings->pwm_range, 0, 255);  // Bring back to 0..255
     }
@@ -344,6 +678,8 @@ void GVMonitorTask(void) {
     else if (AdcPin(pin)) {
       // Read Analog (ADC) GPIO
       pintype = GV_AnalogPin;
+//      pinmode = GV_ANALOG;
+      pinmode = GV_INPUT_PULLUP;  // See Note 20240506
 /*
 #ifdef ESP32
       originalValue = AdcRead(pin, 2);
@@ -367,12 +703,8 @@ void GVMonitorTask(void) {
 //      } else {
 //        currentState = 0;
       }
-#ifdef GV_INPUT_DETECTION      
-      int pin_mode = GetPinMode(pin);
-      pintype = (INPUT == pin_mode) ? GV_InputPin : (INPUT_PULLUP == pin_mode) ? GV_InputPullUp : GV_DigitalPin;
-#else
       pintype = GV_DigitalPin;
-#endif      
+      pinmode = GetPinMode(pin);
     }
 
     if (GV->init_done) {
@@ -380,6 +712,7 @@ void GVMonitorTask(void) {
       GV->lastPinStates[pin] = (pin_type != GPIO_NONE) ? -1 : originalValue;  // During init provide configured GPIOs fixing slow browsers
     }
     if (originalValue != GV->lastPinStates[pin]) { 
+      GV->pinmode[pin] = pinmode;
       if (hasChanges) { jsonMessage += ","; }
       jsonMessage += "\"" + String(pin) + "\":{\"s\":" + currentState + ",\"v\":" + originalValue + ",\"t\":" + pintype + "}";
       GV->lastPinStates[pin] = originalValue;
@@ -518,7 +851,7 @@ void CmndGvUrl(void) {
 #define WEB_HANDLE_GV "gv"
 
 const char HTTP_BTN_MENU_GV[] PROGMEM =
-  "<p><form action='" WEB_HANDLE_GV "' method='get' target='_blank'><button>" D_GPIO_VIEWER "</button></form></p>";
+  "<p></p><form action='" WEB_HANDLE_GV "' method='get' target='_blank'><button>" D_GPIO_VIEWER "</button></form>";
 
 void GVSetupAndStart(void) {
   if (!HttpCheckPriviledgedAccess()) { return; }
@@ -557,7 +890,7 @@ bool Xdrv121(uint32_t function) {
     case FUNC_WEB_ADD_HANDLER:
       WebServer_on(PSTR("/" WEB_HANDLE_GV), GVSetupAndStart);
       break;
-#endif // USE_WEBSERVER
+#endif  // USE_WEBSERVER
   }
   if (GV && (GV->WebServer)) {
     switch (function) {
@@ -580,4 +913,4 @@ bool Xdrv121(uint32_t function) {
   return result;
 }
 
-#endif // USE_GPIO_VIEWER
+#endif  // USE_GPIO_VIEWER

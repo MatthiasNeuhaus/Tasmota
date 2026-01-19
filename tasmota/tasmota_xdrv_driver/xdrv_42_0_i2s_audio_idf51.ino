@@ -30,7 +30,12 @@
 #include "AudioGeneratorTalkie.h"
 #include "AudioFileSourceICYStream.h"
 #include "AudioFileSourceBuffer.h"
+#ifdef USE_I2S_AAC
 #include "AudioGeneratorAAC.h"
+#endif // USE_I2S_AAC
+#ifdef USE_I2S_OPUS
+#include "AudioGeneratorOpus.h"
+#endif // USE_I2S_OPUS
 
 #include <layer3.h>
 
@@ -54,9 +59,9 @@
 extern FS *ufsp;
 extern FS *ffsp;
 
-const int preallocateBufferSize = 16*1024;
-const int preallocateCodecSize = 29192; // MP3 codec max mem needed
-//const int preallocateCodecSize = 85332; // AAC+SBR codec max mem needed
+constexpr int preallocateBufferSize = 16*1024;
+constexpr int preallocateCodecSize  = 29192; // MP3 codec max mem needed
+constexpr int preallocateCodecSizeAAC = 85332; // AAC+SBR codec max mem needed
 
 void sayTime(int hour, int minutes);
 void Cmndwav2mp3(void);
@@ -73,31 +78,40 @@ void CmndI2SMP3Stream(void);
 
 struct AUDIO_I2S_MP3_t {
 #ifdef USE_I2S_MP3
-  AudioGeneratorMP3 *mp3 = nullptr;
-  AudioFileSourceFS *file = nullptr;
-  AudioFileSourceID3 *id3 = nullptr;
+  AudioGenerator *decoder = nullptr;
+  AudioFileSource *file = nullptr;
+  AudioFileSource *id3 = nullptr;
+  AudioFileSource *buff = NULL;
 
-  void *mp3ram = NULL;
+  void *preallocateBuffer = NULL;
+  void *preallocateCodec = NULL;
 #endif // USE_I2S_MP3
 
 #if defined(USE_I2S_MP3) || defined(USE_I2S_WEBRADIO) || defined(USE_SHINE) || defined(MP3_MIC_STREAM)
-  AudioGeneratorMP3 *decoder = NULL;
   TaskHandle_t mp3_task_handle;
   TaskHandle_t mic_task_handle;
+  char audio_title[64];
 #endif // defined(USE_I2S_MP3) || defined(USE_I2S_WEBRADIO)
 
   char mic_path[32];
-  uint8_t mic_stop;
   int8_t mic_error;
+  bool mic_stop = false;
   bool use_stream = false;
+  bool task_running = false;
+  bool file_play_pausing = false;
+  bool task_has_ended = false;
+  bool file_has_paused = false;
+  bool task_loop_mode = false;
+  uint8_t current_file_type = 0; // for resumed playback
+  uint32_t paused_position = 0; // position in the file for paused audio file
 
-
-// SHINE
+// RECORD/STREAM/ENCODING
   uint32_t recdur;
-  uint8_t  stream_active;
-  uint8_t  stream_enable;
+  uint8_t encoder_type;
+  bool  stream_active;
+  bool  stream_enable;
   WiFiClient client;
-  ESP8266WebServer *MP3Server;
+  ESP8266WebServer *StreamServer;
 
 // I2S_BRIDGE
   BRIDGE_MODE bridge_mode;
@@ -109,17 +123,40 @@ struct AUDIO_I2S_MP3_t {
 
 } audio_i2s_mp3;
 
+struct AUDIO_I2S_WEBRADIO_t {
+  AudioFileSourceICYStream *ifile = NULL;
+} Audio_webradio;
+
 #define I2S_AUDIO_MODE_MIC 1
 #define I2S_AUDIO_MODE_SPK 2
+
+/*********************************************************************************************\
+ * Presentation
+\*********************************************************************************************/
+
+#ifdef USE_WEBSERVER
+const char HTTP_I2SAUDIO[] PROGMEM =
+   "{s}" "Audio:" "{m}%s{e}";
+
+void I2sWrShow(bool json) {
+    if (audio_i2s_mp3.decoder) {
+      if (json) {
+        ResponseAppend_P(PSTR(",\"Audio\":{\"Title\":\"%s\"}"), audio_i2s_mp3.audio_title);
+      } else {
+        WSContentSend_PD(HTTP_I2SAUDIO,audio_i2s_mp3.audio_title);
+      }
+    }
+}
+#endif  // USE_WEBSERVER
 
 /*********************************************************************************************\
  * Commands definitions
 \*********************************************************************************************/
 
 const char kI2SAudio_Commands[] PROGMEM = "I2S|"
-  "Gain|Rec|MGain|Stop|Config"
+  "Gain|Rec|Stop|Config"
 #ifdef USE_I2S_MP3
-  "|Play"
+  "|Play|Loop|Pause"
 #endif
 #ifdef USE_I2S_DEBUG
   "|Mic"      // debug only
@@ -139,15 +176,17 @@ const char kI2SAudio_Commands[] PROGMEM = "I2S|"
 #if defined(USE_SHINE) && defined(MP3_MIC_STREAM)
   "|Stream"
 #endif // MP3_MIC_STREAM
-#ifdef I2S_BRIDGE
+#ifdef USE_I2S_BRIDGE
   "|Bridge"
-#endif // I2S_BRIDGE
+#endif // USE_I2S_BRIDGE
 ;
 
 void (* const I2SAudio_Command[])(void) PROGMEM = {
-  &CmndI2SGain, &CmndI2SMicRec, &CmndI2SMicGain, &CmndI2SStop, &CmndI2SConfig,
+  &CmndI2SGain, &CmndI2SMicRec, &CmndI2SStop, &CmndI2SConfig,
 #ifdef USE_I2S_MP3
   &CmndI2SPlay,
+  &CmndI2SLoop,
+  &CmndI2SPause,
 #endif
 #ifdef USE_I2S_DEBUG
   &CmndI2SMic,
@@ -167,8 +206,8 @@ void (* const I2SAudio_Command[])(void) PROGMEM = {
 #if defined(USE_SHINE) && defined(MP3_MIC_STREAM)
   &CmndI2SMP3Stream,
 #endif // MP3_MIC_STREAM
-#ifdef I2S_BRIDGE
-  &CmndI2SI2SBridge,
+#ifdef USE_I2S_BRIDGE
+  &CmndI2SBridge,
 #endif // I2S_BRIDGE
 };
 
@@ -178,6 +217,10 @@ void (* const I2SAudio_Command[])(void) PROGMEM = {
 \*********************************************************************************************/
 
 void CmndI2SConfig(void) {
+  if(!audio_i2s.Settings){
+    ResponseCmndChar_P(PSTR("no valid settings"));
+    return;
+  }
   tI2SSettings * cfg = audio_i2s.Settings;
 
   // if (zigbee.init_phase) { ResponseCmndChar_P(PSTR(D_ZIGBEE_NOT_STARTED)); return; }
@@ -227,11 +270,19 @@ void CmndI2SConfig(void) {
       // cfg->rx.gain = rx.getUInt(PSTR("Gain"), cfg->rx.gain);
       cfg->rx.mode = rx.getUInt(PSTR("Mode"), cfg->rx.mode);
       cfg->rx.slot_mask = rx.getUInt(PSTR("SlotMask"), cfg->rx.slot_mask);
-      cfg->rx.slot_config = rx.getUInt(PSTR("SlotConfig"), cfg->rx.slot_config);
+      cfg->rx.slot_bit_width = rx.getUInt(PSTR("SlotWidth"), cfg->rx.slot_bit_width);
       cfg->rx.channels = rx.getUInt(PSTR("Channels"), cfg->rx.channels);
       cfg->rx.dc_filter_alpha = rx.getUInt(PSTR("DCFilterAlpha"), cfg->rx.dc_filter_alpha);
       cfg->rx.lowpass_alpha = rx.getUInt(PSTR("LowpassAlpha"), cfg->rx.lowpass_alpha);
       cfg->rx.apll = rx.getUInt(PSTR("APLL"), cfg->rx.apll);
+      cfg->rx.ws_width = rx.getUInt(PSTR("WsWidth"), cfg->rx.ws_width);
+      cfg->rx.ws_pol = rx.getUInt(PSTR("WsPol"), cfg->rx.ws_pol);
+      cfg->rx.bit_shift = rx.getUInt(PSTR("BitShift"), cfg->rx.bit_shift);
+      cfg->rx.left_align = rx.getUInt(PSTR("LeftAlign"), cfg->rx.left_align);
+      cfg->rx.big_endian = rx.getUInt(PSTR("BigEndian"), cfg->rx.big_endian);
+      cfg->rx.bit_order_lsb = rx.getUInt(PSTR("LsbOrder"), cfg->rx.bit_order_lsb);
+      cfg->rx.dma_frame_num = rx.getUInt(PSTR("DMAFrame"), cfg->rx.dma_frame_num);
+      cfg->rx.dma_desc_num = rx.getUInt(PSTR("DMADesc"), cfg->rx.dma_desc_num);
     }
     I2SSettingsSave(AUDIO_CONFIG_FILENAME);
   }
@@ -268,11 +319,19 @@ void CmndI2SConfig(void) {
                     // "\"Gain\":%d,"
                     "\"Mode\":%d,"
                     "\"SlotMask\":%d,"
-                    "\"SlotConfig\":%d,"
+                    "\"SlotWidth\":%d,"
                     "\"Channels\":%d,"
                     "\"DCFilterAlpha\":%d,"
                     "\"LowpassAlpha\":%d,"
-                    "\"APLL\":%d"
+                    "\"APLL\":%d,"
+                    "\"WsWidth\":%d,"
+                    "\"WsPol\":%d,"
+                    "\"BitShift\":%d,"
+                    "\"LeftAlign\":%d,"
+                    "\"BigEndian\":%d,"
+                    "\"LsbOrder\":%d,"
+                    "\"DMAFrame\":%d,"
+                    "\"DMADesc\":%d"
                   "}}}",
                   cfg->sys.version,
                   cfg->sys.duplex,
@@ -300,170 +359,20 @@ void CmndI2SConfig(void) {
                   // cfg->rx.gain,
                   cfg->rx.mode,
                   cfg->rx.slot_mask,
-                  cfg->rx.slot_config,
+                  cfg->rx.slot_bit_width,
                   cfg->rx.channels,
                   cfg->rx.dc_filter_alpha,
                   cfg->rx.lowpass_alpha,
-                  cfg->rx.apll
+                  cfg->rx.apll,
+                  cfg->rx.ws_width,
+                  cfg->rx.ws_pol,
+                  cfg->rx.bit_shift,
+                  cfg->rx.left_align,
+                  cfg->rx.big_endian,
+                  cfg->rx.bit_order_lsb,
+                  cfg->rx.dma_frame_num,
+                  cfg->rx.dma_desc_num
                   );
-}
-/*********************************************************************************************\
- * microphone related functions
-\*********************************************************************************************/
-
-// micro to mp3 file or stream
-void I2sMicTask(void *arg){
-  int8_t error = 0;
-  uint8_t *ucp;
-  int written;
-  shine_config_t  config;
-  shine_t s = nullptr;
-  uint16_t samples_per_pass;
-  File mp3_out = (File)nullptr;
-  int16_t *buffer = nullptr;
-  uint16_t bytesize;
-  uint16_t bwritten;
-  uint32_t ctime;
-  uint32_t gain = audio_i2s.Settings->rx.gain;
-
-  if (!audio_i2s_mp3.use_stream) {
-    mp3_out = ufsp->open(audio_i2s_mp3.mic_path, "w");
-    if (!mp3_out) {
-      error = 1;
-      goto exit;
-    }
-  } else {
-    if (!audio_i2s_mp3.stream_active) {
-      error = 2;
-      audio_i2s_mp3.use_stream = 0;
-      goto exit;
-    }
-    audio_i2s_mp3.client.flush();
-    audio_i2s_mp3.client.setTimeout(3);
-    audio_i2s_mp3.client.print("HTTP/1.1 200 OK\r\n"
-    "Content-Type: audio/mpeg;\r\n\r\n");
-
-   //  Webserver->send(200, "application/octet-stream", "");
-    //"Content-Type: audio/mp3;\r\n\r\n");
-  }
-
-  shine_set_config_mpeg_defaults(&config.mpeg);
-
-  if (audio_i2s.Settings->rx.channels == 1) {
-    config.mpeg.mode = MONO;
-  } else {
-    config.mpeg.mode = STEREO;
-  }
-  config.mpeg.bitr = 128;
-  config.wave.samplerate = audio_i2s.Settings->rx.sample_rate;
-  config.wave.channels = (channels)(audio_i2s.Settings->rx.channels);
-
-  if (shine_check_config(config.wave.samplerate, config.mpeg.bitr) < 0) {
-    error = 3;
-    goto exit;
-  }
-
-  s = shine_initialise(&config);
-  if (!s) {
-    error = 4;
-    goto exit;
-  }
-
-  samples_per_pass = shine_samples_per_pass(s);
-  bytesize = samples_per_pass * 2 * (audio_i2s.Settings->rx.channels);
-
-  buffer = (int16_t*)malloc(bytesize);
-  if (!buffer) {
-    error = 5;
-    goto exit;
-  }
-
-  ctime = TasmotaGlobal.uptime;
-
-
-  while (!audio_i2s_mp3.mic_stop) {
-      size_t bytes_read;
-      i2s_channel_read(audio_i2s.rx_handle, (void*)buffer, bytesize, &bytes_read, (100 / portTICK_PERIOD_MS));
-
-      if (gain > 1) {
-        // set gain
-        for (uint32_t cnt = 0; cnt < bytes_read / 2; cnt++) {
-          buffer[cnt] *= gain;
-        }
-      }
-      ucp = shine_encode_buffer_interleaved(s, buffer, &written);
-
-      if (!audio_i2s_mp3.use_stream) {
-        bwritten = mp3_out.write(ucp, written);
-        if (bwritten != written) {
-          break;
-        }
-      } else {
-        audio_i2s_mp3.client.write((const char*)ucp, written);
-
-        if (!audio_i2s_mp3.client.connected()) {
-          break;
-        }
-      }
-      audio_i2s_mp3.recdur = TasmotaGlobal.uptime - ctime;
-  }
-
-  ucp = shine_flush(s, &written);
-
-  if (!audio_i2s_mp3.use_stream) {
-    mp3_out.write(ucp, written);
-  } else {
-    audio_i2s_mp3.client.write((const char*)ucp, written);
-  }
-
-
-exit:
-  if (s) {
-    shine_close(s);
-  }
-  if (mp3_out) {
-    mp3_out.close();
-    AddLog(LOG_LEVEL_INFO, PSTR("I2S: MP3 file closed"));
-  }
-  if (buffer) {
-    free(buffer);
-  }
-
-  if (audio_i2s_mp3.use_stream) {
-    audio_i2s_mp3.client.stop();
-  }
-
-  audio_i2s.out->stopRx();
-  audio_i2s_mp3.mic_stop = 0;
-  audio_i2s_mp3.mic_error = error;
-  AddLog(LOG_LEVEL_INFO, PSTR("mp3task result code: %d"), error);
-  audio_i2s_mp3.mic_task_handle = 0;
-  audio_i2s_mp3.recdur = 0;
-  audio_i2s_mp3.stream_active = 0;
-  vTaskDelete(NULL);
-
-}
-
-int32_t I2sRecordShine(char *path) {
-  esp_err_t err = ESP_OK;
-
-#ifdef USE_I2S_MP3
-  if (audio_i2s_mp3.decoder || audio_i2s_mp3.mp3) return 0;
-#endif
-
-  strlcpy(audio_i2s_mp3.mic_path, path, sizeof(audio_i2s_mp3.mic_path));
-  audio_i2s_mp3.mic_stop = 0;
-  uint32_t stack = 4096;
-  audio_i2s_mp3.use_stream = !strcmp(audio_i2s_mp3.mic_path, "stream.mp3");
-
-  if (audio_i2s_mp3.use_stream) {
-    stack = 8000;
-  }
-  audio_i2s.out->startRx();
-
-  err = xTaskCreatePinnedToCore(I2sMicTask, "MIC", stack, NULL, 3, &audio_i2s_mp3.mic_task_handle, 1);
-
-  return err;
 }
 
 /*********************************************************************************************\
@@ -475,6 +384,7 @@ enum {
   I2S_ERR_OUTPUT_NOT_CONFIGURED,
   I2S_ERR_INPUT_NOT_CONFIGURED,
   I2S_ERR_DECODER_IN_USE,
+  I2S_ERR_DECODER_FAILED_TO_INIT,
   I2S_ERR_FILE_NOT_FOUND,
   I2S_ERR_TX_FAILED,
 };
@@ -507,9 +417,9 @@ void I2SSettingsLoad(const char * config_filename, bool erase) {
   else if (TfsLoadFile(config_filename, (uint8_t*)audio_i2s.Settings, sizeof(tI2SSettings))) {
     AddLog(LOG_LEVEL_INFO, "I2S: config loaded from file '%s'", config_filename);
     if ((audio_i2s.Settings->sys.version == 0) || (audio_i2s.Settings->sys.version > AUDIO_SETTINGS_VERSION)) {
+      AddLog(LOG_LEVEL_DEBUG, "I2S: unsupported configuration version %u, use defaults", audio_i2s.Settings->sys.version);
       delete audio_i2s.Settings;
       audio_i2s.Settings = new tI2SSettings();
-      AddLog(LOG_LEVEL_DEBUG, "I2S: unsuppoted configuration version, use defaults");
       I2SSettingsSave(config_filename);
     }
   }
@@ -671,12 +581,12 @@ void I2sInit(void) {
     i2s->setPinout(bclk, ws, dout, mclk, din,
                     audio_i2s.Settings->sys.mclk_inv[0], audio_i2s.Settings->sys.bclk_inv[0],
                     audio_i2s.Settings->sys.ws_inv[0], audio_i2s.Settings->tx.apll);
-    i2s->setSlotConfig((i2s_port_t)port, audio_i2s.Settings->tx.slot_config, audio_i2s.Settings->rx.slot_config,
+    i2s->setSlotConfig((i2s_port_t)port, audio_i2s.Settings->tx.slot_config,
                       audio_i2s.Settings->tx.slot_mask, audio_i2s.Settings->rx.slot_mask);
     if (tx) {
       i2s->setTxMode(audio_i2s.Settings->tx.mode);
-      i2s->setTxChannels(audio_i2s.Settings->tx.channels);
-      i2s->setRate(audio_i2s.Settings->tx.sample_rate);
+      // i2s->setTxChannels(audio_i2s.Settings->tx.channels);
+      // i2s->setRate(audio_i2s.Settings->tx.sample_rate);
     }
     if (rx) {
       i2s->setRxMode(audio_i2s.Settings->rx.mode);
@@ -687,6 +597,7 @@ void I2sInit(void) {
 
     bool init_tx_ok = false;
     bool init_rx_ok = false;
+    exclusive = true; //TODO: try fix full dupleyx mode
     if (tx && rx && exclusive) {
       i2s->setExclusive(true);
       audio_i2s.Settings->sys.exclusive = exclusive;
@@ -701,8 +612,8 @@ void I2sInit(void) {
     }
     if (init_tx_ok) { audio_i2s.out = i2s; }
     if (init_rx_ok) { audio_i2s.in = i2s; }
-    audio_i2s.Settings->sys.tx = init_tx_ok;
-    audio_i2s.Settings->sys.rx = init_rx_ok;
+    audio_i2s.Settings->sys.tx |= init_tx_ok; // Do not set to zero id already configured on another channnel
+    audio_i2s.Settings->sys.rx |= init_rx_ok;
     if (init_tx_ok && init_rx_ok) { audio_i2s.Settings->sys.duplex = true; }
 
     // if intput and output are configured, don't proceed with other IS2 ports
@@ -716,17 +627,17 @@ void I2sInit(void) {
   if (audio_i2s.out) { audio_i2s.out->setExclusive(exclusive); }
   if (audio_i2s.in) { audio_i2s.in->setExclusive(exclusive); }
 
-  if(audio_i2s.out != nullptr){
-    audio_i2s.out->SetGain(((float)audio_i2s.Settings->tx.gain / 100.0) * 4.0);
-    audio_i2s.out->beginTx();     // TODO - useful?
-    audio_i2s.out->stopTx();
-  }
+  // if(audio_i2s.out != nullptr){
+  //   audio_i2s.out->SetGain(((float)(audio_i2s.Settings->tx.gain + 1)/ 100.0));
+  //   audio_i2s.out->beginTx();     // TODO - useful?
+  //   audio_i2s.out->stopTx();
+  // }
 #ifdef USE_I2S_MP3
-  audio_i2s_mp3.mp3ram = nullptr;
+  audio_i2s_mp3.preallocateCodec = nullptr;
   if (audio_i2s.Settings->sys.mp3_preallocate == 1){
     // if (UsePSRAM()) {
     AddLog(LOG_LEVEL_DEBUG,PSTR("I2S: will allocate buffer for mp3 encoder"));
-    audio_i2s_mp3.mp3ram = special_malloc(preallocateCodecSize);
+    audio_i2s_mp3.preallocateCodec = special_malloc(preallocateCodecSize);
   }
 #endif // USE_I2S_MP3
   AddLog(LOG_LEVEL_DEBUG, "I2S: I2sInit done");
@@ -743,10 +654,15 @@ void I2sInit(void) {
 //
 // Returns `I2S_OK` if ok to send to output or error code
 int32_t I2SPrepareTx(void) {
+  I2sStopPlaying();
+
   AddLog(LOG_LEVEL_DEBUG, "I2S: I2SPrepareTx out=%p", audio_i2s.out);
   if (!audio_i2s.out) { return I2S_ERR_OUTPUT_NOT_CONFIGURED; }
 
   if (!audio_i2s.out->beginTx()) { return I2S_ERR_TX_FAILED; }
+
+  audio_i2s.out->SetGain(((float)(audio_i2s.Settings->tx.gain + 1)/ 100.0));
+
   return I2S_OK;
 }
 
@@ -771,21 +687,26 @@ int32_t I2SPrepareRx(void) {
 
 #if defined(USE_I2S_MP3) || defined(USE_I2S_WEBRADIO)
 void I2sMp3Task(void *arg) {
-  while (1) {
-    while (audio_i2s_mp3.mp3->isRunning()) {
-      if (!audio_i2s_mp3.mp3->loop()) {
-        audio_i2s_mp3.mp3->stop();
-        mp3_delete();
-        audio_i2s.out->stop();
-        if (audio_i2s_mp3.mp3_task_handle) {
-          vTaskDelete(audio_i2s_mp3.mp3_task_handle);
-          audio_i2s_mp3.mp3_task_handle = 0;
-        }
-        //mp3_task_handle=nullptr;
-      }
-     vTaskDelay(pdMS_TO_TICKS(1));
+  audio_i2s_mp3.task_running = true;
+  audio_i2s_mp3.file_play_pausing = false;
+  while (audio_i2s_mp3.decoder->isRunning() && audio_i2s_mp3.task_running) {
+    if (!audio_i2s_mp3.decoder->loop()) {
+      audio_i2s_mp3.task_running = false;
     }
+    if (audio_i2s_mp3.file_play_pausing == true) {
+      audio_i2s_mp3.paused_position = audio_i2s_mp3.file->getPos();
+      audio_i2s_mp3.decoder->stop();
+      audio_i2s_mp3.file_has_paused = true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
+  audio_i2s.out->flush();
+  audio_i2s_mp3.decoder->stop();
+  audio_i2s_mp3.task_loop_mode = false;
+  mp3_delete();
+  audio_i2s_mp3.mp3_task_handle = nullptr;
+  audio_i2s_mp3.task_has_ended = true;
+  vTaskDelete(NULL);
 }
 #endif // defined(USE_I2S_MP3) || defined(USE_I2S_WEBRADIO)
 
@@ -793,54 +714,93 @@ void I2sStatusCallback(void *cbData, int code, const char *string) {
   const char *ptr = reinterpret_cast<const char *>(cbData);
   (void) code;
   (void) ptr;
-  //strncpy_P(status, string, sizeof(status)-1);
-  //status[sizeof(status)-1] = 0;
+  AddLog(LOG_LEVEL_DEBUG, "I2S: -> %s", string);
 }
 
 #ifdef USE_I2S_MP3
-void I2sMp3Task2(void *arg){
-  while (1) {
+void I2sMp3WrTask(void *arg){
+  audio_i2s_mp3.task_running = true;
+  audio_i2s_mp3.task_has_ended = false;
+  while (audio_i2s_mp3.task_running) {
     if (audio_i2s_mp3.decoder && audio_i2s_mp3.decoder->isRunning()) {
       if (!audio_i2s_mp3.decoder->loop()) {
-        I2sStopPlaying();
-        //retryms = millis() + 2000;
+        audio_i2s_mp3.task_running = false;
       }
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
+  audio_i2s.out->flush();
+  I2sWebRadioStopPlaying();
+  audio_i2s_mp3.mp3_task_handle = nullptr;
+  audio_i2s_mp3.task_has_ended = true;
+  vTaskDelete(NULL);
 }
-void I2SStopMP3Play(void) {
-  if (audio_i2s_mp3.mp3_task_handle) {
-    vTaskDelete(audio_i2s_mp3.mp3_task_handle);
-    audio_i2s_mp3.mp3_task_handle = nullptr;
-  }
 
-  if (audio_i2s_mp3.decoder) {
-    audio_i2s_mp3.decoder->stop();
-    delete audio_i2s_mp3.decoder;
-    audio_i2s_mp3.decoder = NULL;
-  }
-}
 #endif // USE_I2S_MP3
 
 void I2sStopPlaying() {
-#ifdef USE_I2S_MP3
-  I2SStopMP3Play();
-#endif // USE_I2S_MP3
-#ifdef USE_I2S_WEBRADIO
-  I2sWebRadioStopPlaying();
-#endif
   I2SAudioPower(false);
+
+  if(audio_i2s_mp3.task_running){
+    audio_i2s_mp3.task_running = false;
+    while(audio_i2s_mp3.task_has_ended == false){
+      delay(10);
+    }
+    while(audio_i2s_mp3.decoder){
+      delay(10);
+    }
+  }
+  if (audio_i2s_mp3.mic_task_handle) {
+    audio_i2s_mp3.mic_stop = 1;
+    while (audio_i2s_mp3.mic_stop) {
+      delay(10);
+    }
+  }
 }
 
 #ifdef USE_I2S_MP3
-// Play_mp3 - Play a MP3 file from filesystem
+
+bool I2SinitDecoder(uint32_t decoder_type){
+  switch(decoder_type){
+    case MP3_DECODER:
+      if (audio_i2s_mp3.preallocateCodec) {
+        audio_i2s_mp3.decoder = dynamic_cast<AudioGenerator *>(new AudioGeneratorMP3(audio_i2s_mp3.preallocateCodec, preallocateCodecSize));
+      } else {
+        audio_i2s_mp3.decoder = dynamic_cast<AudioGenerator *>(new AudioGeneratorMP3());
+      }
+      break;
+#ifdef USE_I2S_AAC
+    case AAC_DECODER:
+      audio_i2s_mp3.preallocateCodec = special_realloc(audio_i2s_mp3.preallocateCodec, preallocateCodecSizeAAC);
+      if(audio_i2s_mp3.preallocateCodec == nullptr){
+        AddLog(LOG_LEVEL_ERROR, "I2S: could not alloc heap for AAC");
+        return false;
+      }
+      audio_i2s_mp3.decoder = dynamic_cast<AudioGenerator *>(new AudioGeneratorAAC(audio_i2s_mp3.preallocateCodec, preallocateCodecSizeAAC));
+      break;
+#endif //USE_I2S_AAC
+#ifdef USE_I2S_OPUS
+    case OPUS_DECODER:
+      free(audio_i2s_mp3.preallocateCodec);
+      audio_i2s_mp3.preallocateCodec = nullptr;
+      audio_i2s_mp3.decoder = dynamic_cast<AudioGenerator *>(new AudioGeneratorOpus());
+      break;
+#endif //USE_I2S_OPUS
+  }
+  if(audio_i2s_mp3.decoder == nullptr){
+    return false;
+  }
+  return true;
+}
+
+// Play a audio file from filesystem
 //
 // Returns I2S_error_t
-int32_t I2SPlayMp3(const char *path) {
-  int32_t i2s_err = I2S_OK;
-  if ((i2s_err = I2SPrepareTx()) != I2S_OK) { return i2s_err; }
-  if (audio_i2s_mp3.decoder || audio_i2s_mp3.mp3) return I2S_ERR_DECODER_IN_USE;
+int32_t I2SPlayFile(const char *path, uint32_t decoder_type) {
+  if (audio_i2s_mp3.decoder != nullptr) return I2S_ERR_DECODER_IN_USE;
+
+  int32_t i2s_err = I2SPrepareTx();
+  if ((i2s_err) != I2S_OK) { return i2s_err; }
 
   // check if the filename starts with '/', if not add it
   char fname[64];
@@ -851,31 +811,56 @@ int32_t I2SPlayMp3(const char *path) {
   }
   if (!ufsp->exists(fname)) { return I2S_ERR_FILE_NOT_FOUND; }
 
+  strncpy(audio_i2s_mp3.audio_title, fname, sizeof(audio_i2s_mp3.audio_title));
+  audio_i2s_mp3.audio_title[sizeof(audio_i2s_mp3.audio_title)-1] = 0;
+  audio_i2s_mp3.current_file_type = decoder_type; //save for i2spause
+
   I2SAudioPower(true);
 
-  audio_i2s_mp3.file = new AudioFileSourceFS(*ufsp, fname);
+  if (audio_i2s_mp3.task_loop_mode == true){
+    File _loopFile = ufsp->open(fname);
+    size_t _fsize = _loopFile.size();
+    audio_i2s_mp3.preallocateBuffer = special_realloc(audio_i2s_mp3.preallocateBuffer,_fsize);
+    size_t _received = _loopFile.read(reinterpret_cast<uint8_t*>(audio_i2s_mp3.preallocateBuffer),_fsize);
+    _loopFile.close();
 
+    audio_i2s_mp3.file = new AudioFileSourceLoopBuffer (audio_i2s_mp3.preallocateBuffer, _fsize); // use the id3 var to make the code shorter down the line
+  } else {
+    audio_i2s_mp3.file = new AudioFileSourceFS(*ufsp, fname);
+  }
   audio_i2s_mp3.id3 = new AudioFileSourceID3(audio_i2s_mp3.file);
 
-  if (audio_i2s_mp3.mp3ram) {
-    audio_i2s_mp3.mp3 = new AudioGeneratorMP3(audio_i2s_mp3.mp3ram, preallocateCodecSize);
+  if(I2SinitDecoder(decoder_type)){
+    audio_i2s_mp3.decoder->begin(audio_i2s_mp3.id3, audio_i2s.out);
+    audio_i2s_mp3.file->seek(audio_i2s_mp3.paused_position, 1); // seek to the position where we paused or have it set to 0, 1 = SEEK_CUR
   } else {
-    audio_i2s_mp3.mp3 = new AudioGeneratorMP3();
+    return I2S_ERR_DECODER_FAILED_TO_INIT;
   }
-  audio_i2s_mp3.mp3->begin(audio_i2s_mp3.id3, audio_i2s.out);
+
+  size_t play_tasksize = 8000; // suitable for ACC and MP3
+  if(decoder_type == OPUS_DECODER){ // opus needs a ton of stack
+    play_tasksize = 26000;
+  }
 
   // Always use a task
-  xTaskCreatePinnedToCore(I2sMp3Task, "MP3", 8192, NULL, 3, &audio_i2s_mp3.mp3_task_handle, 1);
+  xTaskCreatePinnedToCore(I2sMp3Task, "PLAYFILE", play_tasksize, NULL, 3, &audio_i2s_mp3.mp3_task_handle, 1);
   return I2S_OK;
 }
 
 void mp3_delete(void) {
+  delete audio_i2s_mp3.buff;
   delete audio_i2s_mp3.file;
   delete audio_i2s_mp3.id3;
-  delete audio_i2s_mp3.mp3;
-  audio_i2s_mp3.mp3=nullptr;
-  I2SAudioPower(false);
+  delete audio_i2s_mp3.decoder;
+  audio_i2s_mp3.decoder = nullptr;
 }
+
+void i2s_clean_pause_data(void) {
+  audio_i2s_mp3.current_file_type = MP3_DECODER;
+  audio_i2s_mp3.paused_position = 0;
+  audio_i2s_mp3.file_play_pausing = false;
+}
+
 #endif // USE_I2S_MP3
 
 /*********************************************************************************************\
@@ -912,32 +897,54 @@ void CmndI2SMic(void) {
 
 
 void CmndI2SStop(void) {
-  if (!I2SPrepareTx()) {
+  if (I2SPrepareTx() != I2S_OK) {
     ResponseCmndChar("I2S output not configured");
     return;
   }
-  I2sStopPlaying();
+  audio_i2s.out->setGain(0);
+  i2s_clean_pause_data();
   ResponseCmndDone();
 }
 
 #ifdef USE_I2S_MP3
-void CmndI2SPlay(void) {
-  if (I2SPrepareTx()) {
-    ResponseCmndChar("I2S output not configured");
-    return;
+void CmndI2SLoop(void) {
+    audio_i2s_mp3.task_loop_mode = 1;
+    CmndI2SPlay();
+}
+
+void CmndI2SPause(void) {
+  if(audio_i2s_mp3.task_running 
+#ifdef MP3_MIC_STREAM
+    && !audio_i2s_mp3.stream_active
+#endif //MP3_MIC_STREAM
+#ifdef USE_I2S_WEBRADIO
+    && Audio_webradio.ifile == nullptr
+#endif // USE_I2S_WEBRADIO
+  ){
+    audio_i2s_mp3.file_play_pausing = true;
+    ResponseCmndChar("Player Paused");
+  } else {
+    ResponseCmndChar("Player not running"); // or webradio is using decoder
   }
+}
+
+void CmndI2SPlay(void) {
   if (XdrvMailbox.data_len > 0) {
-    int32_t err = I2SPlayMp3(XdrvMailbox.data);
+    i2s_clean_pause_data(); // clean up any previous pause data, set start to 0
+    int32_t err = I2SPlayFile(XdrvMailbox.data, XdrvMailbox.index);
     // display return message
     switch (err) {
       case I2S_OK:
-        ResponseCmndDone();
+        ResponseCmndChar("Started");
         break;
       case I2S_ERR_OUTPUT_NOT_CONFIGURED:
         ResponseCmndChar("I2S output not configured");
         break;
       case I2S_ERR_DECODER_IN_USE:
         ResponseCmndChar("Decoder already in use");
+        break;
+      case I2S_ERR_DECODER_FAILED_TO_INIT:
+        ResponseCmndChar("Decoder failed to init");
         break;
       case I2S_ERR_FILE_NOT_FOUND:
         ResponseCmndChar("File not found");
@@ -950,7 +957,13 @@ void CmndI2SPlay(void) {
         break;
     }
   } else {
-    ResponseCmndChar("Missing filename");
+    if(audio_i2s_mp3.file_play_pausing == true){
+      int32_t err = I2SPlayFile((const char *)audio_i2s_mp3.audio_title, (uint32_t)audio_i2s_mp3.current_file_type); // the line above should rule out basically any error, but we'll see ...
+      AddLog(LOG_LEVEL_DEBUG, "I2S: Resume: %s, type: %i at %i , err: %i", audio_i2s_mp3.audio_title, audio_i2s_mp3.current_file_type, audio_i2s_mp3.paused_position, err);
+      ResponseCmndChar("Player resumed");
+    } else {
+      ResponseCmndChar("Missing filename");
+    }
   }
 }
 #endif // USE_I2S_MP3
@@ -959,7 +972,7 @@ void CmndI2SGain(void) {
   if ((XdrvMailbox.payload >= 0) && (XdrvMailbox.payload <= 100)) {
     if (audio_i2s.out) {
       audio_i2s.Settings->tx.gain = XdrvMailbox.payload;
-      audio_i2s.out->SetGain(((float)(audio_i2s.Settings->tx.gain-2)/100.0)*4.0);
+      audio_i2s.out->SetGain(((float)(audio_i2s.Settings->tx.gain+1)/100.0));
     }
   }
   ResponseCmndNumber(audio_i2s.Settings->tx.gain);
@@ -983,7 +996,7 @@ void CmndI2SSay(void) {
 }
 
 void CmndI2SI2SRtttl(void) {
-  if (I2SPrepareTx()) {
+  if (I2SPrepareTx() != I2S_OK) {
     ResponseCmndChar("I2S output not configured");
     return;
   }
@@ -994,51 +1007,62 @@ void CmndI2SI2SRtttl(void) {
 }
 
 void CmndI2SMicRec(void) {
-  if (audio_i2s.Settings->sys.mp3_preallocate == 1) {
-    if (XdrvMailbox.data_len > 0) {
-      if (!strncmp(XdrvMailbox.data, "-?", 2)) {
-        Response_P("{\"I2SREC-duration\":%d}", audio_i2s_mp3.recdur);
-      } else {
-        I2sRecordShine(XdrvMailbox.data);
-        ResponseCmndChar(XdrvMailbox.data);
-      }
-    } else {
-      if (audio_i2s_mp3.mic_task_handle) {
-        // stop task
-        audio_i2s_mp3.mic_stop = 1;
-        while (audio_i2s_mp3.mic_stop) {
-          delay(1);
-        }
-        ResponseCmndChar_P(PSTR("Stopped"));
-      }
-    }
+  if (I2SPrepareRx()) {
+    ResponseCmndChar("I2S Mic not configured");
+    return;
   }
-  else{
-    if (audio_i2s.in){
-      ResponseCmndChar_P(PSTR("need PSRAM for MP3 recording"));
+
+  if (XdrvMailbox.data_len > 0) {
+    if (!strncmp(XdrvMailbox.data, "-?", 2)) {
+      Response_P("{\"I2SREC-duration\":%d}", audio_i2s_mp3.recdur);
+    } else {
+      audio_i2s_mp3.use_stream = false;
+      int err = I2sRecord(XdrvMailbox.data, XdrvMailbox.index);
+      // int err = I2sRecordShine(XdrvMailbox.data);
+      if(err == pdPASS){
+        ResponseCmndChar(XdrvMailbox.data);
+      } else {
+        ResponseCmndChar_P(PSTR("Did not launch recording task"));
+      }
     }
-    else{
-      ResponseCmndChar_P(PSTR("no mic configured"));
+  } else {
+    if (audio_i2s_mp3.mic_task_handle) {
+      // stop task
+      audio_i2s_mp3.mic_stop = 1;
+      while (audio_i2s_mp3.mic_stop) {
+        delay(1);
+      }
+      ResponseCmndChar_P(PSTR("Stopped"));
+    }
+    else {
+      ResponseCmndChar_P(PSTR("No running recording"));
     }
   }
 }
 
-// mic gain in factor not percent
-void CmndI2SMicGain(void) {
-  // TODO - does nothing for now
-  if ((XdrvMailbox.payload >= 0) && (XdrvMailbox.payload <= 256)) {
-      audio_i2s.Settings->rx.gain = XdrvMailbox.payload;
+void I2sEventHandler(){
+  if(audio_i2s_mp3.file_has_paused == true){
+    audio_i2s_mp3.task_has_ended = false; //do not send ended event
+    audio_i2s_mp3.file_has_paused = false;
+    audio_i2s_mp3.task_running = false;
+    MqttPublishPayloadPrefixTopicRulesProcess_P(RESULT_OR_STAT,PSTR(""),PSTR("{\"Event\":{\"I2SPlay\":\"Paused\"}}"));
+    // Rule1 ON event#i2splay=paused DO <something> ENDON
+    I2SAudioPower(false);
   }
-  ResponseCmndNumber(audio_i2s.Settings->rx.gain);
+  if(audio_i2s_mp3.task_has_ended == true){
+    audio_i2s_mp3.task_has_ended = false;
+      audio_i2s_mp3.task_running = false;
+    MqttPublishPayloadPrefixTopicRulesProcess_P(RESULT_OR_STAT,PSTR(""),PSTR("{\"Event\":{\"I2SPlay\":\"Ended\"}}"));
+    // Rule1 ON event#i2splay=ended DO <something> ENDON
+    I2SAudioPower(false);
+  }
 }
 
 /*********************************************************************************************\
  * Interface
 \*********************************************************************************************/
 
-void I2sMp3Loop(void);
-void I2sMp3Init(uint32_t on);
-void MP3ShowStream(void);
+void I2sStreamLoop(void);
 
 bool Xdrv42(uint32_t function) {
   bool result = false;
@@ -1046,6 +1070,9 @@ bool Xdrv42(uint32_t function) {
   switch (function) {
     case FUNC_INIT:
       I2sInit();
+      break;
+    case FUNC_EVERY_50_MSECOND:
+      I2sEventHandler();
       break;
     case FUNC_COMMAND:
       result = DecodeCommand(kI2SAudio_Commands, I2SAudio_Command);
@@ -1055,17 +1082,12 @@ bool Xdrv42(uint32_t function) {
       break;
     case FUNC_LOOP:
 #if defined(USE_SHINE) && defined(MP3_MIC_STREAM)
-      I2sMp3Loop();
+      I2sStreamLoop();
 #endif
 #if defined(I2S_BRIDGE)
       i2s_bridge_loop();
 #endif
       break;
-    case FUNC_WEB_ADD_HANDLER:
-#if defined(USE_SHINE) && defined(MP3_MIC_STREAM)
-      audio_i2s.Settings->tx.stream_enable = 1;
-      I2sMp3Init(1);
-#endif
 #if defined(I2S_BRIDGE)
       I2SBridgeInit();
 #endif

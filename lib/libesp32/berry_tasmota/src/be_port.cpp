@@ -119,7 +119,8 @@ extern "C" {
                 break;
         }
 
-        if (be_top(vm) >= 1 && be_isstring(vm, 1)) {
+        int argc = be_top(vm);
+        if (argc >= 1 && be_isstring(vm, 1)) {
             const char *path = be_tostring(vm, 1);
             if (path != nullptr) {
                 switch (action){
@@ -134,6 +135,16 @@ extern "C" {
                         break;
                     case MPATH_MKDIR:
                         res = zip_ufsp.mkdir(path);
+                        break;
+                    case MPATH_RENAME:
+                        {
+                            if (argc >= 2 && be_isstring(vm, 2)) {
+                                const char *path2 = be_tostring(vm, 2);
+                                res = zip_ufsp.rename(path, path2);
+                            } else {
+                                res = -1;
+                            }
+                        }
                         break;
                     case MPATH_LISTDIR:
                         be_newobject(vm, "list"); // add our list object and fall through
@@ -205,7 +216,10 @@ extern "C" {
 
 BERRY_API char* be_readstring(char *buffer, size_t size)
 {
-    return be_fgets(stdin, buffer, (int)size);
+    if ((size > 0) && (buffer != NULL)) {
+        *buffer = 0;
+    }
+    return buffer;
 }
 
 /* use the standard library implementation file API. */
@@ -301,11 +315,13 @@ char* be_fgets(void *hfile, void *buffer, int size)
     uint8_t * buf = (uint8_t*) buffer;
     if (hfile != nullptr && buffer != nullptr && size > 0) {
         File * f_ptr = (File*) hfile;
-        int ret = f_ptr->readBytesUntil('\n', buf, size - 2);
-        // Serial.printf("be_fgets ret=%d\n", ret);
+        int ret = f_ptr->readBytesUntil('\n', buf, size - 1);
+        // Serial.printf("be_fgets size=%d ret=%d, tell=%i, fsize=%i\n", size, ret, f_ptr->position(), f_ptr->size());
         if (ret >= 0) {
             buf[ret] = 0;           // add string terminator
-            if (ret > 0 && ret < size - 2) {
+            if ((ret == 0) && (f_ptr->position() >= f_ptr->size())) {
+                return NULL;
+            } else if (ret < size - 1) {
                 buf[ret] = '\n';
                 buf[ret+1] = 0;
             }
@@ -313,7 +329,7 @@ char* be_fgets(void *hfile, void *buffer, int size)
         }
     }
 #endif // USE_UFILESYS
-    return nullptr;
+    return NULL;
     // return fgets(buffer, size, hfile);
 }
 

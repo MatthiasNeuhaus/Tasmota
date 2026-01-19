@@ -36,7 +36,7 @@
 \*******************************************************************************************/
 
 
-#if defined(USE_LVGL_TOUCHSCREEN) || defined(USE_FT5206) || defined(USE_XPT2046) || defined(USE_GT911) || defined(USE_LILYGO47) || defined(USE_UNIVERSAL_TOUCH) || defined(USE_TOUCH_BUTTONS) || defined(SIMPLE_RES_TOUCH)
+#if defined(USE_FT5206) || defined(USE_XPT2046) || defined(USE_GT911) || defined(USE_LILYGO47) || defined(USE_UNIVERSAL_TOUCH) || defined(USE_TOUCH_BUTTONS) || defined(SIMPLE_RES_TOUCH)
 
 #include <renderer.h>
 
@@ -82,14 +82,16 @@ bool utouch_found = false;
 VButton *buttons[MAX_TOUCH_BUTTONS];
 #endif
 
-void Touch_SetStatus(uint8_t touches, uint16_t raw_x, uint16_t raw_y, uint8_t gesture) {
+void Touch_SetStatus(uint8_t touches, uint16_t raw_x, uint16_t raw_y, uint8_t gesture, bool force_no_convert) {
   TSGlobal.external_ts = true;
   TSGlobal.gesture = gesture;
   TSGlobal.touches = touches;
   TSGlobal.touched = (TSGlobal.touches > 0);
   TSGlobal.touch_xp = TSGlobal.raw_touch_xp = raw_x;
   TSGlobal.touch_yp = TSGlobal.raw_touch_yp = raw_y;
-  TS_RotConvert(&TSGlobal.touch_xp, &TSGlobal.touch_yp);
+  if (!force_no_convert) {
+    TS_RotConvert(&TSGlobal.touch_xp, &TSGlobal.touch_yp);
+  }
 }
 
 // return true if succesful, false if not configured
@@ -126,11 +128,6 @@ uint32_t Touch_Status(int32_t sel) {
     return 0;
   }
 }
-
-#ifdef USE_M5STACK_CORE2
-uint8_t tbstate[3];
-#endif // USE_M5STACK_CORE2
-
 
 // simple resistive touch pins
 // with dma it should check for active transfers
@@ -247,7 +244,7 @@ void utouch_Touch_Init() {
     char *name;
     utouch_found = renderer->utouch_Init(&name);
     if (utouch_found) {
-      AddLog(LOG_LEVEL_INFO, PSTR("UT: %s"), name);
+      AddLog(LOG_LEVEL_INFO, PSTR("UTI: %s initialized"), name);
     }
   }
 }
@@ -447,46 +444,14 @@ void Touch_Check(void(*rotconvert)(int16_t *x, int16_t *y)) {
 
   if (TSGlobal.touched) {
     was_touched = true;
-#ifdef USE_TOUCH_BUTTONS
-#ifdef USE_M5STACK_CORE2
-    // handle  3 built in touch buttons
-    uint16_t xcenter = 80;
-#define TDELTA 30
-#define TYPOS 275
-    for (uint32_t tbut = 0; tbut < 3; tbut++) {
-      if (TSGlobal.touch_xp > (xcenter - TDELTA) && TSGlobal.touch_xp < (xcenter + TDELTA) && TSGlobal.touch_yp > (TYPOS - TDELTA) && TSGlobal.touch_yp < (TYPOS + TDELTA)) {
-        // hit a button
-        if (!(tbstate[tbut] & 1)) {
-          // pressed
-          tbstate[tbut] |= 1;
-          //AddLog(LOG_LEVEL_INFO, PSTR("tbut: %d pressed"), tbut);
-          Touch_MQTT(tbut, "BIB", tbstate[tbut] & 1);
-        }
-      }
-      xcenter += 100;
-    }
-#endif  // USE_M5STACK_CORE2
-#endif // USE_TOUCH_BUTTONS
-
     rotconvert(&TSGlobal.touch_xp, &TSGlobal.touch_yp);
-    AddLog(LOG_LEVEL_DEBUG_MORE, "TS : TSGlobal.touched x=%i y=%i gest=0x%02x (raw x=%i y=%i)", TSGlobal.touch_xp, TSGlobal.touch_yp, TSGlobal.gesture, TSGlobal.raw_touch_xp, TSGlobal.raw_touch_yp);
+    AddLog(LOG_LEVEL_DEBUG_MORE, "TS : touched  x=%i y=%i gest=0x%02x (raw x=%i y=%i)", TSGlobal.touch_xp, TSGlobal.touch_yp, TSGlobal.gesture, TSGlobal.raw_touch_xp, TSGlobal.raw_touch_yp);
 
 #ifdef USE_TOUCH_BUTTONS
     CheckTouchButtons(TSGlobal.touched, TSGlobal.touch_xp, TSGlobal.touch_yp);
 #endif // USE_TOUCH_BUTTONS
 
   } else {
-#ifdef USE_M5STACK_CORE2
-    for (uint32_t tbut = 0; tbut < 3; tbut++) {
-      if (tbstate[tbut] & 1) {
-        // released
-        tbstate[tbut] &= 0xfe;
-        Touch_MQTT(tbut, "BIB", tbstate[tbut] & 1);
-        //AddLog(LOG_LEVEL_INFO, PSTR("tbut: %d released"), tbut);
-      }
-    }
-#endif  // USE_M5STACK_CORE2
-
     rotconvert(&TSGlobal.touch_xp, &TSGlobal.touch_yp);   // still do rot convert if not TSGlobal.touched
     if (was_touched) {
       AddLog(LOG_LEVEL_DEBUG_MORE, "TS : released x=%i y=%i (raw x=%i y=%i)", TSGlobal.touch_xp, TSGlobal.touch_yp, TSGlobal.raw_touch_xp, TSGlobal.raw_touch_yp);

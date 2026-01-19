@@ -61,7 +61,7 @@
 // SPI_MOSI_DLEN_REG is not defined anymore in esp32s3
 #define SPI_MOSI_DLEN_REG(x) SPI_MS_DLEN_REG(x)
 
-#elif CONFIG_IDF_TARGET_ESP32C2 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+#elif CONFIG_IDF_TARGET_ESP32C2 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32P4
 #define SPI_HOST    SPI1_HOST
 #define HSPI_HOST   SPI2_HOST
 #define VSPI_HOST   SPI2_HOST  /* No SPI3_host on C2/C6 */
@@ -70,3 +70,10 @@
 #define SPI_MOSI_DLEN_REG(x) SPI_MS_DLEN_REG(x)
 
 #endif // TARGET
+
+// This trick makes sure that 'lto' optimizer does not inline `delay()
+// so we can override it with `-Wl,--wrap=delay` linker directive
+#ifdef __cplusplus
+extern "C"
+#endif // _cplusplus
+void  delay(__UINT32_TYPE__ ms) __attribute__((noinline)) __attribute__ ((noclone));
