@@ -1,38 +1,141 @@
 /*
-  user_config_override.h - user configuration overrides my_user_config.h for Tasmota
-
-  Copyright (C) 2021  Theo Arends
-
-  This program is free software: you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 3 of the License, or
-  (at your option) any later version.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  user_config_override.h - Optimiert für ESP32 mit 16MB Flash
+  
+  Für Olimex ESP32-POE mit SML Stromzähler-Auslesen
+  Basierend auf ottelo's Anleitung und Scripts
 */
 
 #ifndef _USER_CONFIG_OVERRIDE_H_
 #define _USER_CONFIG_OVERRIDE_H_
 
-/*****************************************************************************************************\
- * USAGE:
- *   To modify the stock configuration without changing the my_user_config.h file:
- *   (1) copy this file to "user_config_override.h" (It will be ignored by Git)
- *   (2) define your own settings below
- *
- ******************************************************************************************************
- * ATTENTION:
- *   - Changes to SECTION1 PARAMETER defines will only override flash settings if you change define CFG_HOLDER.
- *   - Expect compiler warnings when no ifdef/undef/endif sequence is used.
- *   - You still need to update my_user_config.h for major define USE_MQTT_TLS.
- *   - All parameters can be persistent changed online using commands via MQTT, WebConsole or Serial.
-\*****************************************************************************************************/
+// Nur für Custom-Build aktivieren
+#ifdef FIRMWARE_TASMOTA32_16MB_SML
+
+#warning **** user_config_override.h: Custom Build für 16MB ESP32 SML ****
+
+/*******************************************************************************
+ * GRUNDLEGENDE EINSTELLUNGEN
+ ******************************************************************************/
+
+// Zeitzone für Deutschland
+#undef APP_TIMEZONE
+#define APP_TIMEZONE             99
+
+/*******************************************************************************
+ * SCRIPT & SML AKTIVIERUNG (KERNFEATURES)
+ ******************************************************************************/
+
+// WICHTIG: Rules deaktivieren, Script aktivieren
+#undef USE_RULES
+#ifndef USE_SCRIPT
+#define USE_SCRIPT
+#endif
+
+// SML Smart Meter Interface aktivieren
+#ifndef USE_SML_M
+#define USE_SML_M
+#endif
+
+/*******************************************************************************
+ * SCRIPT FEATURES - Alle für ottelo's Google Chart Scripts benötigten
+ ******************************************************************************/
+
+#ifndef USE_SCRIPT_WEB_DISPLAY
+#define USE_SCRIPT_WEB_DISPLAY
+#endif
+
+#ifndef USE_SCRIPT_JSON_EXPORT
+#define USE_SCRIPT_JSON_EXPORT
+#endif
+
+#ifndef USE_SCRIPT_SUB_COMMAND
+#define USE_SCRIPT_SUB_COMMAND
+#endif
+
+#ifndef USE_SCRIPT_STATUS
+#define USE_SCRIPT_STATUS
+#endif
+
+#ifndef SCRIPT_POWER_SECTION
+#define SCRIPT_POWER_SECTION
+#endif
+
+#ifndef SUPPORT_MQTT_EVENT
+#define SUPPORT_MQTT_EVENT
+#endif
+
+#ifndef SUPPORT_IF_STATEMENT
+#define SUPPORT_IF_STATEMENT
+#endif
+
+// Größere Variablen-Limits
+#undef MAXFILT
+#define MAXFILT                  16
+
+#undef SCRIPT_MAXSSIZE
+#define SCRIPT_MAXSSIZE          254
+
+/*******************************************************************************
+ * FILESYSTEM - 16MB FLASH OPTIMAL NUTZEN
+ ******************************************************************************/
+
+#ifndef USE_UFILESYS
+#define USE_UFILESYS
+#endif
+
+#undef UFSYS_SIZE
+#define UFSYS_SIZE               16384
+
+#undef SCRIPT_FATFS
+#define SCRIPT_FATFS             -1
+
+/*******************************************************************************
+ * MQTT SETTINGS
+ ******************************************************************************/
+
+#undef MQTT_EVENT_MSIZE
+#define MQTT_EVENT_MSIZE         512
+
+#undef MQTT_EVENT_JSIZE
+#define MQTT_EVENT_JSIZE         800
+
+/*******************************************************************************
+ * NICHT BENÖTIGTE FEATURES DEAKTIVIEREN - Spart Flash & RAM
+ ******************************************************************************/
+
+#ifdef USE_KNX
+#undef USE_KNX
+#endif
+
+#ifdef USE_ZIGBEE
+#undef USE_ZIGBEE
+#endif
+
+#ifdef USE_BLE_ESP32
+#undef USE_BLE_ESP32
+#endif
+
+#ifdef USE_MI_ESP32
+#undef USE_MI_ESP32
+#endif
+
+#ifdef USE_IR_REMOTE
+#undef USE_IR_REMOTE
+#endif
+
+#ifdef USE_IR_RECEIVE
+#undef USE_IR_RECEIVE
+#endif
+
+#ifdef USE_WEBCAM
+#undef USE_WEBCAM
+#endif
+
+#ifdef USE_LVGL
+#undef USE_LVGL
+#endif
+
+#endif  // FIRMWARE_TASMOTA32_16MB_SML
 
 /*
 Examples :
@@ -86,9 +189,11 @@ Examples :
 // !!! Remember that your changes GOES AT THE BOTTOM OF THIS FILE right before the last #endif !!!
 */
 
+#ifdef DFIRMWARE_BLUETOOTH
 // Enable BLE
 #ifndef USE_BLE_ESP32
 #define USE_BLE_ESP32                 // (ESP32 only) Add support for ESP32 as a BLE-bridge (+9k2 mem, +292k flash)
+#endif
 #endif
 
 #endif  // _USER_CONFIG_OVERRIDE_H_
