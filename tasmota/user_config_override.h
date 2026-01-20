@@ -1,142 +1,157 @@
 /*
-  user_config_override.h - Optimiert für ESP32 mit 16MB Flash
+  user_config_override.h - Basierend auf ottelo's tasmota-sml-images
   
-  Für Olimex ESP32-POE mit SML Stromzähler-Auslesen
-  Basierend auf ottelo's Anleitung und Scripts
+  Angepasst für ESP32 mit 16MB Flash (Olimex ESP32-POE)
+  Original: https://github.com/ottelo9/tasmota-sml-images
 */
 
 #ifndef _USER_CONFIG_OVERRIDE_H_
 #define _USER_CONFIG_OVERRIDE_H_
 
-// Nur für Custom-Build aktivieren
 #ifdef FIRMWARE_TASMOTA32_16MB_SML
 
-#warning **** user_config_override.h: Custom Build für 16MB ESP32 SML ****
+#warning **** user_config_override.h: 16MB ESP32 SML Build (basierend auf ottelo) ****
 
 /*******************************************************************************
- * GRUNDLEGENDE EINSTELLUNGEN
+ * (1) Unnötige Features deaktivieren
  ******************************************************************************/
-
-// Zeitzone für Deutschland
-#undef APP_TIMEZONE
-#define APP_TIMEZONE             99
-
-/*******************************************************************************
- * SCRIPT & SML AKTIVIERUNG (KERNFEATURES)
- ******************************************************************************/
-
-// WICHTIG: Rules deaktivieren, Script aktivieren
-#undef USE_RULES
-#ifndef USE_SCRIPT
-#define USE_SCRIPT
-#endif
-
-// SML Smart Meter Interface aktivieren
-#ifndef USE_SML_M
-#define USE_SML_M
-#endif
-
-/*******************************************************************************
- * SCRIPT FEATURES - Alle für ottelo's Google Chart Scripts benötigten
- ******************************************************************************/
-
-#ifndef USE_SCRIPT_WEB_DISPLAY
-#define USE_SCRIPT_WEB_DISPLAY
-#endif
-
-#ifndef USE_SCRIPT_JSON_EXPORT
-#define USE_SCRIPT_JSON_EXPORT
-#endif
-
-#ifndef USE_SCRIPT_SUB_COMMAND
-#define USE_SCRIPT_SUB_COMMAND
-#endif
-
-#ifndef USE_SCRIPT_STATUS
-#define USE_SCRIPT_STATUS
-#endif
-
-#ifndef SCRIPT_POWER_SECTION
-#define SCRIPT_POWER_SECTION
-#endif
-
-#ifndef SUPPORT_MQTT_EVENT
-#define SUPPORT_MQTT_EVENT
-#endif
-
-#ifndef SUPPORT_IF_STATEMENT
-#define SUPPORT_IF_STATEMENT
-#endif
-
-// Größere Variablen-Limits
-#undef MAXFILT
-#define MAXFILT                  16
-
-#undef SCRIPT_MAXSSIZE
-#define SCRIPT_MAXSSIZE          254
-
-/*******************************************************************************
- * FILESYSTEM - 16MB FLASH OPTIMAL NUTZEN
- ******************************************************************************/
-
-#ifndef USE_UFILESYS
-#define USE_UFILESYS
-#endif
-
-#undef UFSYS_SIZE
-#define UFSYS_SIZE               16384
-
-#undef SCRIPT_FATFS
-#define SCRIPT_FATFS             -1
-
-/*******************************************************************************
- * MQTT SETTINGS
- ******************************************************************************/
-
-#undef MQTT_EVENT_MSIZE
-#define MQTT_EVENT_MSIZE         512
-
-#undef MQTT_EVENT_JSIZE
-#define MQTT_EVENT_JSIZE         800
-
-/*******************************************************************************
- * NICHT BENÖTIGTE FEATURES DEAKTIVIEREN - Spart Flash & RAM
- ******************************************************************************/
-
-#ifdef USE_KNX
-#undef USE_KNX
-#endif
-
-#ifdef USE_ZIGBEE
-#undef USE_ZIGBEE
-#endif
-
-#ifdef USE_BLE_ESP32
-#undef USE_BLE_ESP32
-#endif
-
-#ifdef USE_MI_ESP32
-#undef USE_MI_ESP32
-#endif
-
-#ifdef USE_IR_REMOTE
+#undef USE_DOMOTICZ
+#undef USE_EMULATION_HUE
+#undef USE_EMULATION_WEMO
+#undef ROTARY_V1
+#undef USE_SONOFF_RF
+#undef USE_SONOFF_SC
+#undef USE_TUYA_MCU
+#undef USE_ARMTRONIX_DIMMERS
+#undef USE_PS_16_DZ
+#undef USE_SONOFF_IFAN
+#undef USE_BUZZER
+#undef USE_ARILUX_RF
+#undef USE_SHUTTER
+#undef USE_EXS_DIMMER
+#undef USE_DEVICE_GROUPS
+#undef USE_PWM_DIMMER
+#undef USE_SONOFF_D1
+#undef USE_SHELLY_DIMMER
+#undef SHELLY_CMDS
+#undef SHELLY_FW_UPGRADE
+#undef USE_LIGHT
+#undef USE_WS2812
+#undef USE_MY92X1
+#undef USE_SM16716
+#undef USE_SM2135
+#undef USE_SM2335
+#undef USE_BP1658CJ
+#undef USE_BP5758D
+#undef USE_SONOFF_L1
+#undef USE_ELECTRIQ_MOODL
+#undef USE_LIGHT_PALETTE
+#undef USE_LIGHT_VIRTUAL_CT
+#undef USE_DGR_LIGHT_SEQUENCE
+#undef USE_SERIAL_BRIDGE
+#undef USE_ENERGY_DUMMY
+#undef USE_PZEM004T
+#undef USE_PZEM_AC
+#undef USE_PZEM_DC
+#undef USE_MCP39F501
 #undef USE_IR_REMOTE
-#endif
+#undef GV_USE_ESPINFO
+#undef USE_GPIO_VIEWER
+#undef USE_ADC
+#undef USE_NETWORK_LIGHT_SCHEMES
+#undef USE_AUTOCONF
+#undef USE_CSE7761
 
-#ifdef USE_IR_RECEIVE
-#undef USE_IR_RECEIVE
-#endif
+// BMP Sensor aktivieren (optional für Temperatur/Luftdruck)
+#define USE_BMP
 
-#ifdef USE_WEBCAM
-#undef USE_WEBCAM
-#endif
+/*******************************************************************************
+ * (2) Stack Size erhöhen
+ ******************************************************************************/
+#undef SET_ESP32_STACK_SIZE
+#define SET_ESP32_STACK_SIZE (12 * 1024)
 
-#ifdef USE_LVGL
-#undef USE_LVGL
-#endif
+/*******************************************************************************
+ * (3) Große Arrays und Variablen für ESP32
+ ******************************************************************************/
+#define SCRIPT_LARGE_VNBUFF
+#define MAX_ARRAY_SIZE 2000
+
+/*******************************************************************************
+ * (4) Filesystem - 16MB Flash nutzen
+ ******************************************************************************/
+#define USE_SCRIPT_FATFS_EXT
+#define USE_UFILESYS
+#undef UFSYS_SIZE
+#define UFSYS_SIZE 16384
+
+/*******************************************************************************
+ * (5) SML, Script, Google Chart Support
+ ******************************************************************************/
+#define USE_SCRIPT
+#define USE_SML_M
+#define USE_SML_CRC
+#undef USE_RULES
+#define USE_GOOGLE_CHARTS
+#define LARGE_ARRAYS
+#define USE_SCRIPT_WEB_DISPLAY
+#define USE_CW_CALC
+#define USE_HOME_ASSISTANT
+#define USE_WEBCLIENT_HTTPS
+#define USE_HTML_CALLBACK       // Für smlpd() Smartmeter Descriptor Dropdown
+
+// Erweiterte Funktionen
+#define USE_ANGLE_FUNC
+#define USE_FEXTRACT
+
+// SML Auth Key
+#define USE_SML_AUTHKEY
+#define USE_TLS
+
+/*******************************************************************************
+ * (6) ESP32 spezifische Features
+ ******************************************************************************/
+#define USE_ESP32_SW_SERIAL
+#define USE_SCRIPT_SERIAL
+#define SCRIPT_FULL_WEBPAGE
+#define USE_MQTT_TLS
+#define USE_INFLUXDB
+
+/*******************************************************************************
+ * (7) Ethernet Support (für Olimex ESP32-POE)
+ ******************************************************************************/
+#define USE_ETHERNET
+
+/*******************************************************************************
+ * (8) TCP Server und Task Support
+ ******************************************************************************/
+#define USE_SCRIPT_TCP_SERVER
+#define USE_SCRIPT_TASK
+
+/*******************************************************************************
+ * (9) Shelly/EcoTracker Emulation (für Marstek Akkus etc.)
+ ******************************************************************************/
+#define USE_SCRIPT_MDNS
+
+/*******************************************************************************
+ * (10) Globale Variablen und JSON Export
+ ******************************************************************************/
+#define USE_SCRIPT_GLOBVARS
+#define USE_SCRIPT_JSON_EXPORT
+
+/*******************************************************************************
+ * (11) SCRIPT DROPDOWN MENÜ - Scripts von ottelo's GitHub
+ ******************************************************************************/
+#define SCRIPT_LIST_DOWNLOAD_URL "https://raw.githubusercontent.com/ottelo9/tasmota-sml-script/main/script-list-menu/scripts/"
+#define SCRIPT_LIST "scripts.json"
+
+/*******************************************************************************
+ * (12) OTA URL (optional - für dein eigenes Repo anpassen)
+ ******************************************************************************/
+// #undef OTA_URL
+// #define OTA_URL "https://raw.githubusercontent.com/DEIN_USER/DEIN_REPO/main/firmware.bin"
 
 #endif  // FIRMWARE_TASMOTA32_16MB_SML
-
 /*
 Examples :
 
@@ -195,5 +210,4 @@ Examples :
 #define USE_BLE_ESP32                 // (ESP32 only) Add support for ESP32 as a BLE-bridge (+9k2 mem, +292k flash)
 #endif
 #endif
-
 #endif  // _USER_CONFIG_OVERRIDE_H_
