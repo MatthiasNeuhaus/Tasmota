@@ -64,6 +64,7 @@
 
 // BMP Sensor aktivieren (optional für Temperatur/Luftdruck)
 #define USE_BMP
+#define USE_SDM120
 
 /*******************************************************************************
  * (2) Stack Size erhöhen
